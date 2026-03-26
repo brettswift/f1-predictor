@@ -43,5 +43,5 @@ jobs:
           build-args: |
             APP_VERSION=${{ steps.version.outputs.version }}
           tags: |
-            ghcr.io/buddybs/f1-predictor:${{ steps.version.outputs.version }}
-            ghcr.io/buddybs/f1-predictor:live
+            ghcr.io/${{ github.repository_owner }}/f1-predictor:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/f1-predictor:live
