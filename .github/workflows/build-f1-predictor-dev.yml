@@ -2,7 +2,7 @@ name: Build f1-predictor dev image
 
 on:
   push:
-    branches: [f1-dev]
+    branches: [dev]
   workflow_dispatch:
 
 jobs:
