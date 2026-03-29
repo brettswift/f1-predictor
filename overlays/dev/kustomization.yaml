@@ -7,7 +7,7 @@ resources:
 - namespace.yaml
 - ../../base
 - ingress.yaml
-- ../../../f1-mock-api/base
+- ../../f1-mock-api/base
 
 patches:
 - target:
