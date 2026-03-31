@@ -9,8 +9,10 @@ os.environ['DATABASE_PATH'] = ':memory:'
 os.environ['TESTING'] = 'true'
 os.environ['F1_API_URL'] = 'https://api.jolpi.ca/ergast/f1'
 
-# Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+# Add project root and src to path (root needed for 'from tests.utils...' imports)
+_root = os.path.dirname(os.path.dirname(__file__))
+sys.path.insert(0, _root)
+sys.path.insert(0, os.path.join(_root, 'src'))
 
 # Import after setting env vars
 import app as app_module
