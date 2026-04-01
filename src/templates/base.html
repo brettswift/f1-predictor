@@ -230,6 +230,80 @@
             font-size: 11px;
             color: rgba(255, 255, 255, 0.35);
         }
+
+        /* Mobile responsiveness */
+        @media (max-width: 600px) {
+            .container {
+                padding: 10px;
+            }
+
+            header .container {
+                flex-direction: column;
+                gap: 10px;
+                text-align: center;
+            }
+
+            nav a {
+                margin: 0 8px;
+                font-size: 14px;
+            }
+
+            h1 {
+                font-size: 24px;
+            }
+
+            h2 {
+                font-size: 20px;
+            }
+
+            .card {
+                padding: 20px 15px;
+            }
+
+            .podium {
+                flex-direction: column;
+                gap: 10px;
+            }
+
+            table {
+                font-size: 14px;
+            }
+
+            th, td {
+                padding: 8px 4px;
+            }
+
+            .btn {
+                padding: 10px 16px;
+                font-size: 14px;
+            }
+
+            .user-info {
+                text-align: center;
+            }
+
+            .card > div {
+                flex-direction: column !important;
+                text-align: center !important;
+            }
+
+            .card > div > div:last-child {
+                text-align: center !important;
+                margin-top: 10px;
+            }
+        }
+
+        /* Scrollable tables on mobile */
+        .table-scroll {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        @media (max-width: 600px) {
+            .table-scroll table {
+                min-width: 500px;
+            }
+        }
     </style>
     {% block extra_css %}{% endblock %}
 </head>
