@@ -338,6 +338,20 @@ def refresh_drivers_from_api(db):
         driver['new_id'] = new_id
         new_id += 1
 
+    # Update predictions to use new driver IDs before deleting old drivers
+    # Build CASE expressions for each column to avoid order-of-updates issue
+    p1_cases = " ".join(f"WHEN {old_id} THEN {new_id}" for old_id, new_id in id_mapping.items())
+    p2_cases = p1_cases
+    p3_cases = p1_cases
+
+    if id_mapping:
+        db.execute(f'''
+            UPDATE predictions
+            SET p1_driver_id = CASE p1_driver_id {p1_cases} ELSE p1_driver_id END,
+                p2_driver_id = CASE p2_driver_id {p2_cases} ELSE p2_driver_id END,
+                p3_driver_id = CASE p3_driver_id {p3_cases} ELSE p3_driver_id END
+        ''')
+
     db.execute('DELETE FROM drivers')
 
     for driver in drivers:
