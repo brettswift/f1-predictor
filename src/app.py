@@ -113,7 +113,7 @@ def init_db():
     db.execute('''
         CREATE TABLE IF NOT EXISTS users (
             session_id TEXT PRIMARY KEY,
-            username TEXT NOT NULL,
+            username TEXT NOT NULL UNIQUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -581,13 +581,25 @@ def set_username():
         flash('Please enter a username', 'error')
         return redirect(url_for('index'))
 
-    session_id = str(uuid.uuid4())
     db = get_db()
-    db.execute(
-        'INSERT INTO users (session_id, username) VALUES (?, ?)',
-        (session_id, username)
-    )
-    db.commit()
+    
+    # Check if user with this username already exists
+    existing = db.execute(
+        'SELECT session_id FROM users WHERE username = ?',
+        (username,)
+    ).fetchone()
+    
+    if existing:
+        # Reuse existing user's session_id
+        session_id = existing['session_id']
+    else:
+        # Create new user with new session_id
+        session_id = str(uuid.uuid4())
+        db.execute(
+            'INSERT INTO users (session_id, username) VALUES (?, ?)',
+            (session_id, username)
+        )
+        db.commit()
 
     session['session_id'] = session_id
     return redirect(url_for('home'))
