@@ -905,6 +905,9 @@ def enter_results(race_id):
             flash('Please select all three positions', 'error')
             return redirect(url_for('enter_results', race_id=race_id))
 
+        # Convert to integers for proper score calculation
+        p1_int, p2_int, p3_int = int(p1), int(p2), int(p3)
+
         db.execute('''
             INSERT INTO results (race_id, p1_driver_id, p2_driver_id, p3_driver_id)
             VALUES (?, ?, ?, ?)
@@ -912,10 +915,10 @@ def enter_results(race_id):
                 p1_driver_id = excluded.p1_driver_id,
                 p2_driver_id = excluded.p2_driver_id,
                 p3_driver_id = excluded.p3_driver_id
-        ''', (race_id, p1, p2, p3))
+        ''', (race_id, p1_int, p2_int, p3_int))
 
         predictions = db.execute('SELECT * FROM predictions WHERE race_id = ?', (race_id,)).fetchall()
-        result = {'p1_driver_id': p1, 'p2_driver_id': p2, 'p3_driver_id': p3}
+        result = {'p1_driver_id': p1_int, 'p2_driver_id': p2_int, 'p3_driver_id': p3_int}
 
         for pred in predictions:
             points = calculate_score(pred, result)
