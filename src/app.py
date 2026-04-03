@@ -113,7 +113,7 @@ def init_db():
     db.execute('''
         CREATE TABLE IF NOT EXISTS users (
             session_id TEXT PRIMARY KEY,
-            username TEXT NOT NULL,
+            username TEXT NOT NULL UNIQUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -337,6 +337,20 @@ def refresh_drivers_from_api(db):
             id_mapping[old_id] = new_id
         driver['new_id'] = new_id
         new_id += 1
+
+    # Update predictions to use new driver IDs before deleting old drivers
+    # Build CASE expressions for each column to avoid order-of-updates issue
+    p1_cases = " ".join(f"WHEN {old_id} THEN {new_id}" for old_id, new_id in id_mapping.items())
+    p2_cases = p1_cases
+    p3_cases = p1_cases
+
+    if id_mapping:
+        db.execute(f'''
+            UPDATE predictions
+            SET p1_driver_id = CASE p1_driver_id {p1_cases} ELSE p1_driver_id END,
+                p2_driver_id = CASE p2_driver_id {p2_cases} ELSE p2_driver_id END,
+                p3_driver_id = CASE p3_driver_id {p3_cases} ELSE p3_driver_id END
+        ''')
 
     db.execute('DELETE FROM drivers')
 
@@ -567,13 +581,25 @@ def set_username():
         flash('Please enter a username', 'error')
         return redirect(url_for('index'))
 
-    session_id = str(uuid.uuid4())
     db = get_db()
-    db.execute(
-        'INSERT INTO users (session_id, username) VALUES (?, ?)',
-        (session_id, username)
-    )
-    db.commit()
+    
+    # Check if user with this username already exists
+    existing = db.execute(
+        'SELECT session_id FROM users WHERE username = ?',
+        (username,)
+    ).fetchone()
+    
+    if existing:
+        # Reuse existing user's session_id
+        session_id = existing['session_id']
+    else:
+        # Create new user with new session_id
+        session_id = str(uuid.uuid4())
+        db.execute(
+            'INSERT INTO users (session_id, username) VALUES (?, ?)',
+            (session_id, username)
+        )
+        db.commit()
 
     session['session_id'] = session_id
     return redirect(url_for('home'))

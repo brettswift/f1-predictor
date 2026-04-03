@@ -129,3 +129,34 @@ class TestRaceLocking:
         # Check race is now locked
         race = db.execute('SELECT * FROM races WHERE round = 96').fetchone()
         assert race['status'] == 'locked', "Past race should be locked on startup"
+
+    def test_race_lock_on_request(self, app, time_controller, client):
+        """T-RL-009: before_request handler auto-locks races.
+        
+        Given a race is scheduled to start in the past
+        And the race status is 'open'
+        When a user makes a request to the app (e.g., /admin/drivers-status)
+        Then the before_request handler should call auto_lock_races()
+        And the race status should be updated to 'locked'
+        """
+        past_race_time = datetime(2026, 3, 20, 14, 0, 0, tzinfo=timezone.utc)
+
+        time_controller.freeze(datetime(2026, 3, 23, 15, 0, 0, tzinfo=timezone.utc))
+
+        from app import get_db
+        db = get_db()
+        db.execute('''
+            INSERT INTO races (name, round, date, status)
+            VALUES (?, ?, ?, 'open')
+        ''', ('Past Race', 95, past_race_time.strftime('%Y-%m-%d %H:%M:%S')))
+        db.commit()
+
+        race = db.execute('SELECT * FROM races WHERE round = 95').fetchone()
+        assert race['status'] == 'open', "Race should be open before request"
+
+        # /admin/drivers-status is not exempt from before_request handler
+        response = client.get('/admin/drivers-status')
+        assert response.status_code == 200, f"Expected 200, got {response.status_code}"
+
+        race = db.execute('SELECT * FROM races WHERE round = 95').fetchone()
+        assert race['status'] == 'locked', "Race should be locked after request (before_request handler)"
