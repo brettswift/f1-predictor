@@ -1,0 +1,42 @@
+# Standalone race locking CronJob (CJ-8).
+# Runs every minute to lock races whose start time has passed.
+# Uses direct DB update — no HTTP call, no auth, no race condition.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: f1-lock-races
+  namespace: f1-predictor
+spec:
+  schedule: "* * * * *"   # Every minute
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 300
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: lock-races
+            image: ghcr.io/brettswift/f1-predictor:latest
+            command:
+            - python3
+            - /app/cron/lock_races.py
+            env:
+            - name: DATABASE_PATH
+              value: "/data/f1_predictions.db"
+            resources:
+              requests:
+                cpu: "50m"
+                memory: "64Mi"
+              limits:
+                cpu: "200m"
+                memory: "128Mi"
+            volumeMounts:
+            - name: data
+              mountPath: /data
+          volumes:
+          - name: data
+            persistentVolumeClaim:
+              claimName: f1-predictor-data
