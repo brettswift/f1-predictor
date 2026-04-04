@@ -923,19 +923,28 @@ def predict(race_id):
             flash('Please select three different drivers', 'error')
             return redirect(url_for('predict', race_id=race_id))
 
-        db.execute('''
-            INSERT INTO predictions (user_id, race_id, p1_driver_id, p2_driver_id, p3_driver_id)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(user_id, race_id) DO UPDATE SET
-                p1_driver_id = excluded.p1_driver_id,
-                p2_driver_id = excluded.p2_driver_id,
-                p3_driver_id = excluded.p3_driver_id,
-                created_at = CURRENT_TIMESTAMP
-        ''', (user['session_id'], race_id, p1, p2, p3))
-        db.commit()
+        # ADM-006/ADM-007: Check for existing prediction before inserting
+        existing_check = db.execute(
+            'SELECT 1 FROM predictions WHERE user_id = ? AND race_id = ?',
+            (user['session_id'], race_id)
+        ).fetchone()
+        if existing_check:
+            flash('You already submitted predictions for this race. Visit the race page to update.', 'error')
+            return redirect(url_for('races'))
 
-        flash('Prediction saved!', 'success')
-        return redirect(url_for('home'))
+        try:
+            db.execute('''
+                INSERT INTO predictions (user_id, race_id, p1_driver_id, p2_driver_id, p3_driver_id)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (user['session_id'], race_id, p1, p2, p3))
+            db.commit()
+            flash('Prediction saved!', 'success')
+            return redirect(url_for('home'))
+        except Exception as e:
+            db.rollback()
+            # ADM-006/ADM-007: Graceful fallback for any remaining constraint violations
+            flash('You already submitted predictions for this race. Visit the race page to update.', 'error')
+            return redirect(url_for('races'))
 
     existing = db.execute('''
         SELECT p1_driver_id, p2_driver_id, p3_driver_id

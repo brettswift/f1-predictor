@@ -191,59 +191,92 @@ class TestPredictionUpdate:
         db.commit()
         return race_id, driver_ids
 
-    def test_ui_004_prediction_update_replaces_old(self, app, client):
-        """UI-004: Prediction update replaces old.
-        
-        Given a user has already submitted a prediction
-        When they submit a new prediction for the same race
-        Then the old prediction should be replaced
+    def test_ui_004_prediction_insert_creates_prediction(self, app, client):
+        """UI-004: Prediction insert creates new prediction.
+
+        Given a user has not submitted a prediction
+        When they POST to /predict/<race_id>
+        Then the prediction is saved successfully
         """
         from app import get_db
         db = get_db()
         race_id, driver_ids = self._insert_race_and_drivers(db, round_num=201, status='open', hours_ahead=24)
 
-        # Login
-        client.post('/set-username', data={'username': 'updateuser'})
-        
+        client.post('/set-username', data={'username': 'insertuser'})
+
         with client.session_transaction() as sess:
             session_id = sess['session_id']
 
         p1, p2, p3 = driver_ids[0], driver_ids[1], driver_ids[2]
-        p1_new, p2_new, p3_new = driver_ids[3], driver_ids[4], driver_ids[5]
 
-        # First prediction
-        response1 = client.post(f'/predict/{race_id}', data={
-            'p1': str(p1),
-            'p2': str(p2),
-            'p3': str(p3)
+        response = client.post(f'/predict/{race_id}', data={
+            'p1': str(p1), 'p2': str(p2), 'p3': str(p3)
         }, follow_redirects=False)
-        assert response1.status_code == 302
+        assert response.status_code == 302
 
-        # Update prediction
-        response2 = client.post(f'/predict/{race_id}', data={
-            'p1': str(p1_new),
-            'p2': str(p2_new),
-            'p3': str(p3_new)
-        }, follow_redirects=False)
-        assert response2.status_code == 302
-
-        # Should only have one prediction
-        predictions = db.execute(
-            'SELECT * FROM predictions WHERE user_id = ? AND race_id = ?',
-            (session_id, race_id)
-        ).fetchall()
-        
-        assert len(predictions) == 1, "Should only have one prediction after update"
-
-        # The prediction should be the new one
-        updated = db.execute(
+        pred = db.execute(
             'SELECT * FROM predictions WHERE user_id = ? AND race_id = ?',
             (session_id, race_id)
         ).fetchone()
-        
-        assert updated['p1_driver_id'] == p1_new, "P1 should be updated to new value"
-        assert updated['p2_driver_id'] == p2_new, "P2 should be updated to new value"
-        assert updated['p3_driver_id'] == p3_new, "P3 should be updated to new value"
+        assert pred is not None, "Prediction should be created"
+        assert pred['p1_driver_id'] == p1
+
+
+    def test_adm_006_duplicate_prediction_shows_friendly_error(self, app, client):
+        """ADM-006: Duplicate prediction shows friendly error.
+
+        Given a user has already submitted a prediction for a race
+        When they POST to /predict/<race_id> again
+        Then they get a friendly flash message and are redirected to /races
+        """
+        from app import get_db
+        db = get_db()
+        race_id, driver_ids = self._insert_race_and_drivers(db, round_num=301, status='open', hours_ahead=24)
+
+        client.post('/set-username', data={'username': 'dupuser'})
+
+        p1, p2, p3 = driver_ids[0], driver_ids[1], driver_ids[2]
+
+        # First prediction - should succeed
+        response1 = client.post(f'/predict/{race_id}', data={
+            'p1': str(p1), 'p2': str(p2), 'p3': str(p3)
+        }, follow_redirects=False)
+        assert response1.status_code == 302
+
+        # Second POST - should show friendly error
+        response2 = client.post(f'/predict/{race_id}', data={
+            'p1': str(p1), 'p2': str(p2), 'p3': str(p3)
+        }, follow_redirects=True)
+        assert response2.status_code == 200
+        content = response2.data.decode('utf-8')
+        assert 'already submitted' in content.lower() or 'You already' in content
+
+    def test_adm_007_duplicate_prediction_redirects_to_races(self, app, client):
+        """ADM-007: Duplicate prediction redirects to /races (not raw error).
+
+        Given a user tries to submit a duplicate prediction
+        When the friendly error is triggered
+        Then they are redirected to /races (not an error page)
+        """
+        from app import get_db
+        db = get_db()
+        race_id, driver_ids = self._insert_race_and_drivers(db, round_num=302, status='open', hours_ahead=24)
+
+        client.post('/set-username', data={'username': 'redirectuser'})
+
+        p1, p2, p3 = driver_ids[0], driver_ids[1], driver_ids[2]
+
+        # First prediction
+        client.post(f'/predict/{race_id}', data={
+            'p1': str(p1), 'p2': str(p2), 'p3': str(p3)
+        }, follow_redirects=False)
+
+        # Second POST - should redirect to /races (not /home)
+        response = client.post(f'/predict/{race_id}', data={
+            'p1': str(p1), 'p2': str(p2), 'p3': str(p3)
+        }, follow_redirects=False)
+        assert response.status_code == 302
+        assert '/races' in response.location
 
 
 class TestRaceListDisplay:
