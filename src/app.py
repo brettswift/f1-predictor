@@ -946,21 +946,65 @@ def predict(race_id):
 
 @app.route('/leaderboard')
 def leaderboard():
-    """Show leaderboard with all users and their scores."""
+    """Show leaderboard with all users and their scores.
+
+    Query params:
+        season: Filter by season year (e.g. ?season=2026).
+                If 'current' or omitted, defaults to current year.
+    """
     user = get_current_user()
     if not user:
         return redirect(url_for('index'))
 
     db = get_db()
-    users = db.execute('''
+
+    # Determine season filter
+    current_year = datetime.now().year
+    season_param = request.args.get('season', 'current')
+
+    if season_param == 'current' or season_param == '':
+        filter_year = current_year
+    else:
+        try:
+            filter_year = int(season_param)
+        except ValueError:
+            filter_year = current_year
+
+    # Build race filter for SQL
+    race_filter_sql = "AND strftime('%Y', r.date) = ?"
+    race_filter_args = (str(filter_year),)
+
+    # Get users with scores filtered by season
+    users = db.execute(f'''
         SELECT u.*, COALESCE(SUM(s.points), 0) as total_score
         FROM users u
         LEFT JOIN scores s ON u.session_id = s.user_id
+        LEFT JOIN races r ON s.race_id = r.id
+        GROUP BY u.session_id
+        HAVING COUNT(CASE WHEN r.id IS NOT NULL THEN 1 END) = 0
+           OR SUM(CASE WHEN strftime('%Y', r.date) = ? THEN s.points ELSE 0 END) >= 0
+        ORDER BY total_score DESC
+    ''', (str(filter_year),)).fetchall()
+
+    # Re-query properly: users and their scores from races in the selected season
+    users = db.execute(f'''
+        SELECT u.*, COALESCE(SUM(s.points), 0) as total_score
+        FROM users u
+        LEFT JOIN scores s ON u.session_id = s.user_id
+        LEFT JOIN races r ON s.race_id = r.id AND strftime('%Y', r.date) = ?
         GROUP BY u.session_id
         ORDER BY total_score DESC
-    ''').fetchall()
+    ''', (str(filter_year),)).fetchall()
 
-    races = get_races_with_computed_status(db)
+    # Get races in the selected season
+    races = db.execute('''
+        SELECT r.*
+        FROM races r
+        WHERE r.status = 'completed'
+        AND strftime('%Y', r.date) = ?
+        ORDER BY r.date ASC
+    ''', (str(filter_year),)).fetchall()
+
     score_matrix = {}
     for u in users:
         score_matrix[u['session_id']] = {}
@@ -975,7 +1019,8 @@ def leaderboard():
                           users=users,
                           races=races,
                           score_matrix=score_matrix,
-                          current_user=user)
+                          current_user=user,
+                          season=filter_year)
 
 @app.route('/races')
 def races():

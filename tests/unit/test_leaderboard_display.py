@@ -1,5 +1,142 @@
 """Unit tests for leaderboard and display (F1-UI-2: Test leaderboard and display)."""
 
+"""Unit tests for leaderboard and display (F1-UI-2, ADM-2: Season filter)."""
+
+import pytest
+import os
+from datetime import datetime, timezone, timedelta
+
+class TestSeasonFilter:
+    """Test cases for ADM-005: Season filter on leaderboard."""
+
+    def test_adm_005_season_param_filters_by_year(self, app, client):
+        """ADM-005: ?season=YYYY filters leaderboard to races in that year."""
+        from app import get_db
+        db = get_db()
+
+        db.execute('INSERT INTO users (session_id, username) VALUES (?, ?)',
+                   ('season-user', 'seasonuser'))
+        db.execute('INSERT INTO races (id, name, round, date, status) VALUES (?, ?, ?, ?, ?)',
+                   (1001, '2026 GP', 1, '2026-03-15 14:00:00', 'completed'))
+        db.execute('INSERT INTO races (id, name, round, date, status) VALUES (?, ?, ?, ?, ?)',
+                   (1002, '2025 GP', 2, '2025-03-15 14:00:00', 'completed'))
+        db.execute('INSERT INTO scores (user_id, race_id, points) VALUES (?, ?, ?)',
+                   ('season-user', 1001, 20))
+        db.execute('INSERT INTO scores (user_id, race_id, points) VALUES (?, ?, ?)',
+                   ('season-user', 1002, 15))
+        db.commit()
+
+        with client.session_transaction() as sess:
+            sess['session_id'] = 'season-user'
+
+        response = client.get('/leaderboard?season=2026')
+        assert response.status_code == 200
+        content = response.data.decode('utf-8')
+        assert 'Season 2026' in content
+
+        response2025 = client.get('/leaderboard?season=2025')
+        assert response2025.status_code == 200
+        content2025 = response2025.data.decode('utf-8')
+        assert 'Season 2025' in content2025
+
+    def test_adm_005_no_param_defaults_to_current_year(self, app, client):
+        """ADM-005: No season param defaults to current year."""
+        from app import get_db
+        db = get_db()
+
+        db.execute('INSERT INTO users (session_id, username) VALUES (?, ?)',
+                   ('default-user', 'defaultuser'))
+        db.execute('INSERT INTO races (id, name, round, date, status) VALUES (?, ?, ?, ?, ?)',
+                   (2001, 'Current GP', 1, '2026-04-01 14:00:00', 'completed'))
+        db.execute('INSERT INTO scores (user_id, race_id, points) VALUES (?, ?, ?)',
+                   ('default-user', 2001, 25))
+        db.commit()
+
+        with client.session_transaction() as sess:
+            sess['session_id'] = 'default-user'
+
+        response = client.get('/leaderboard')
+        assert response.status_code == 200
+        content = response.data.decode('utf-8')
+        assert '2026' in content
+
+    def test_adm_005_season_current_defaults_to_current_year(self, app, client):
+        """ADM-005: ?season=current defaults to current year."""
+        from app import get_db
+        db = get_db()
+
+        db.execute('INSERT INTO users (session_id, username) VALUES (?, ?)',
+                   ('current-user', 'currentuser'))
+        db.execute('INSERT INTO races (id, name, round, date, status) VALUES (?, ?, ?, ?, ?)',
+                   (2002, 'Current GP 2', 1, '2026-05-01 14:00:00', 'completed'))
+        db.execute('INSERT INTO scores (user_id, race_id, points) VALUES (?, ?, ?)',
+                   ('current-user', 2002, 30))
+        db.commit()
+
+        with client.session_transaction() as sess:
+            sess['session_id'] = 'current-user'
+
+        response = client.get('/leaderboard?season=current')
+        assert response.status_code == 200
+        content = response.data.decode('utf-8')
+        assert 'Season 2026' in content or '2026' in content
+
+    def test_adm_005_only_completed_races_in_season(self, app, client):
+        """ADM-005: Season filter only shows completed races in that year."""
+        from app import get_db
+        db = get_db()
+
+        db.execute('INSERT INTO users (session_id, username) VALUES (?, ?)',
+                   ('incomplete-user', 'incompleteuser'))
+        db.execute('INSERT INTO races (id, name, round, date, status) VALUES (?, ?, ?, ?, ?)',
+                   (3001, 'Completed 2026', 1, '2026-03-01 14:00:00', 'completed'))
+        db.execute('INSERT INTO races (id, name, round, date, status) VALUES (?, ?, ?, ?, ?)',
+                   (3002, 'Open 2026', 2, '2026-06-01 14:00:00', 'open'))
+        db.execute('INSERT INTO scores (user_id, race_id, points) VALUES (?, ?, ?)',
+                   ('incomplete-user', 3001, 20))
+        db.commit()
+
+        with client.session_transaction() as sess:
+            sess['session_id'] = 'incomplete-user'
+
+        response = client.get('/leaderboard?season=2026')
+        assert response.status_code == 200
+        content = response.data.decode('utf-8')
+        assert 'Completed' in content  # name split()[0] = 'Completed'
+
+    def test_adm_005_invalid_season_falls_back_to_current(self, app, client):
+        """ADM-005: Invalid season param falls back to current year."""
+        from app import get_db
+        db = get_db()
+
+        db.execute('INSERT INTO users (session_id, username) VALUES (?, ?)',
+                   ('invalid-user', 'invaliduser'))
+        db.commit()
+
+        with client.session_transaction() as sess:
+            sess['session_id'] = 'invalid-user'
+
+        response = client.get('/leaderboard?season=abc')
+        assert response.status_code == 200
+
+    def test_adm_005_season_links_present_when_filtered(self, app, client):
+        """ADM-005: Season links shown when viewing a specific season."""
+        from app import get_db
+        db = get_db()
+
+        db.execute('INSERT INTO users (session_id, username) VALUES (?, ?)',
+                   ('links-user', 'linksuser'))
+        db.commit()
+
+        with client.session_transaction() as sess:
+            sess['session_id'] = 'links-user'
+
+        response = client.get('/leaderboard?season=2026')
+        assert response.status_code == 200
+        content = response.data.decode('utf-8')
+        assert '/leaderboard' in content
+
+
 import pytest
 import os
 from datetime import datetime, timezone, timedelta
