@@ -1,47 +1,63 @@
-# F1 Predictor App
-# trigger: image-refresh
-
-# --- Base stage ---
-FROM python:3.11-slim as base
+# =============================================================================
+# Stage 1: builder — install all dependencies
+# =============================================================================
+FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
-# Install dependencies
+# Install build deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python deps
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip \
+    && pip install --prefix=/install -r requirements.txt
 
-# Copy application
-COPY src/ ./
-COPY cron/ ./cron/
+# =============================================================================
+# Stage 2: test — run pytest in isolated environment
+# =============================================================================
+FROM python:3.12-slim AS test
 
-# Create data directory for SQLite
-RUN mkdir -p /data
+WORKDIR /app
 
-# Environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV DATABASE_PATH=/data/f1_predictions.db
+# Install runtime deps only
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# --- Test stage ---
-FROM base as test
+# Copy installed deps from builder
+COPY --from=builder /install /usr/local
 
-# Copy tests
+# Copy source and tests
+COPY src/ ./src/
 COPY tests/ ./tests/
+COPY conftest.py ./
 
-# Run tests
-CMD ["pytest", "tests/unit", "-v"]
+# Run tests and exit
+CMD ["pytest", "-v", "--tb=short"]
 
-# --- Production stage ---
-FROM base as production
+# =============================================================================
+# Stage 3: production — Flask app served by gunicorn
+# =============================================================================
+FROM python:3.12-slim AS production
 
-ARG APP_VERSION=""
-ENV APP_VERSION=$APP_VERSION
+WORKDIR /app
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')" || exit 1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
 
-EXPOSE 5000
+COPY --from=builder /install /usr/local/
 
-# Run with gunicorn for production
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "4", "--access-logfile", "-", "--error-logfile", "-", "app:app"]
+COPY src/ ./src/
+COPY templates/ ./templates/
+COPY requirements.txt ./
+
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8000
+
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]
