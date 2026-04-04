@@ -1,0 +1,74 @@
+version: "3.9"
+
+services:
+  # ---------------------------------------------------------------------
+  # Flask app in test mode (used by integration/e2e tests)
+  # ---------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      target: test
+    container_name: f1-app-test
+    environment:
+      - FLASK_ENV=testing
+      - DATABASE_URL=sqlite:///./test.db
+      - APP_VERSION=test
+      - ENVIRONMENT=test
+    volumes:
+      - ./src:/app/src:ro
+      - ./tests:/app/tests:ro
+      - ./conftest.py:/app/conftest.py:ro
+    depends_on:
+      - db
+    networks:
+      - f1-test
+
+  # ---------------------------------------------------------------------
+  # Test database (persistent between runs for debugging)
+  # ---------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    container_name: f1-db-test
+    environment:
+      - POSTGRES_DB=f1_test
+      - POSTGRES_USER=f1
+      - POSTGRES_PASSWORD=f1
+    networks:
+      - f1-test
+    volumes:
+      - f1-db-test-data:/var/lib/postgresql/data
+
+  # ---------------------------------------------------------------------
+  # Test runner — runs pytest and exits
+  # Use: docker compose -f docker-compose.test.yml run --rm test-runner
+  # ---------------------------------------------------------------------
+  test-runner:
+    build:
+      context: .
+      target: test
+    container_name: f1-test-runner
+    environment:
+      - FLASK_ENV=testing
+      - DATABASE_URL=postgresql://f1:f1@db:5432/f1_test
+      - APP_VERSION=test
+      - ENVIRONMENT=test
+    volumes:
+      - ./.test-results:/test-results
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      pytest -v
+      --tb=short
+      --junitxml=/test-results/results.xml
+      --color=yes
+    networks:
+      - f1-test
+
+networks:
+  f1-test:
+    name: f1-test-net
+
+volumes:
+  f1-db-test-data:
+    name: f1-db-test-data
