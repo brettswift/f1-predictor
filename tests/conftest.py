@@ -3,6 +3,7 @@
 import pytest
 import os
 import sys
+import responses
 
 # Set environment variables BEFORE anything else
 os.environ['DATABASE_PATH'] = ':memory:'
@@ -51,23 +52,26 @@ def runner(app):
 
 @pytest.fixture
 def mock_f1_api(monkeypatch):
-    """Mock F1 API responses for testing."""
-    class MockResponse:
-        def __init__(self, json_data, status_code=200):
-            self.json_data = json_data
-            self.status_code = status_code
-        
-        def json(self):
-            return self.json_data
+    """Mock F1 API responses for testing using responses library.
     
-    def mock_get(*args, **kwargs):
-        return MockResponse({"MRData": {"RaceTable": {"Races": []}}})
+    This fixture uses the responses library to mock HTTP requests.
+    It provides an easy way to register mock responses for specific endpoints.
+    """
+    import responses
     
-    monkeypatch.setattr("requests.get", mock_get)
-    return mock_get
+    # Activate the responses mock
+    with responses.RequestsMock() as rsps:
+        # Default: return empty races list
+        rsps.add(
+            responses.GET,
+            'https://api.jolpi.ca/ergast/f1/2026/1/results.json',
+            json={"MRData": {"RaceTable": {"Races": []}}},
+            status=200
+        )
+        yield rsps
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def clean_env():
     """Ensure clean environment for each test."""
     # Store original values
