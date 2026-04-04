@@ -1,0 +1,335 @@
+{% extends "base.html" %}
+
+{% block title %}Live - {{ race['name'] }} - F1 Predictor{% endblock %}
+
+{% block extra_css %}
+<style>
+    .live-badge {
+        display: inline-block;
+        background: #e10600;
+        color: #fff;
+        padding: 4px 12px;
+        border-radius: 12px;
+        font-size: 12px;
+        font-weight: bold;
+        animation: pulse 2s infinite;
+    }
+    
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.6; }
+    }
+    
+    .position-change-up {
+        color: #00c853;
+        font-weight: bold;
+    }
+    
+    .position-change-down {
+        color: #e10600;
+        font-weight: bold;
+    }
+    
+    .position-change-same {
+        color: #9e9e9e;
+    }
+    
+    .projection-card {
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 8px;
+        padding: 15px;
+        margin-bottom: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    
+    .projection-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 10px;
+    }
+    
+    .projection-points {
+        font-size: 24px;
+        font-weight: bold;
+        color: #e10600;
+    }
+    
+    .projection-range {
+        font-size: 12px;
+        opacity: 0.7;
+    }
+    
+    .driver-tracker {
+        display: flex;
+        gap: 15px;
+        flex-wrap: wrap;
+        margin-top: 15px;
+    }
+    
+    .driver-card {
+        flex: 1;
+        min-width: 150px;
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 8px;
+        padding: 12px;
+        text-align: center;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    
+    .driver-predicted {
+        font-size: 10px;
+        opacity: 0.6;
+        margin-bottom: 5px;
+    }
+    
+    .driver-name {
+        font-weight: bold;
+        margin-bottom: 5px;
+    }
+    
+    .driver-position {
+        font-size: 20px;
+        font-weight: bold;
+    }
+    
+    .position-1 { color: #ffd700; }
+    .position-2 { color: #c0c0c0; }
+    .position-3 { color: #cd7f32; }
+    .position-other { color: #9e9e9e; }
+    
+    .api-unavailable {
+        background: rgba(255, 193, 7, 0.2);
+        border: 1px solid #ffc107;
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+        text-align: center;
+    }
+    
+    .last-updated {
+        font-size: 12px;
+        opacity: 0.6;
+        text-align: center;
+        margin-top: 10px;
+    }
+    
+    .live-table {
+        width: 100%;
+    }
+    
+    .live-table th {
+        background: rgba(255, 255, 255, 0.1);
+    }
+    
+    .points-exact {
+        color: #e10600;
+        font-weight: bold;
+    }
+    
+    .points-driver {
+        color: #ff8c00;
+    }
+    
+    .points-none {
+        color: #9e9e9e;
+    }
+    
+    .highlight-row {
+        background: rgba(225, 6, 0, 0.1) !important;
+        border-left: 3px solid #e10600;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+            <h2>🏁 {{ race['name'] }} - <span class="live-badge">🔴 LIVE</span></h2>
+            <p>Round {{ race['round'] }} · {{ race['date'][:10] }}</p>
+        </div>
+        <div>
+            <a href="{{ url_for('races') }}" class="btn btn-secondary">← Back to Races</a>
+        </div>
+    </div>
+</div>
+
+{# LL-008: Graceful fallback if API unavailable #}
+{% if not api_available %}
+<div class="api-unavailable">
+    <p><strong>⚠️ Live data temporarily unavailable</strong></p>
+    <p style="font-size: 14px; margin-bottom: 0;">The F1 API is not responding. The page will automatically retry. 
+    Your predictions are saved and points will be calculated once data is restored.</p>
+</div>
+{% endif %}
+
+{# Live Race Positions #}
+{% if live_positions %}
+<div class="card">
+    <h3>🏎️ Current Race Positions</h3>
+    <div class="table-scroll">
+        <table class="live-table">
+            <thead>
+                <tr>
+                    <th>Pos</th>
+                    <th>Driver</th>
+                    <th>Team</th>
+                    <th>Laps</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for pos in live_positions[:20] %}
+                <tr>
+                    <td>
+                        {% if pos['position'] == 1 %}
+                        <span class="position-1">🥇 {{ pos['position'] }}</span>
+                        {% elif pos['position'] == 2 %}
+                        <span class="position-2">🥈 {{ pos['position'] }}</span>
+                        {% elif pos['position'] == 3 %}
+                        <span class="position-3">🥉 {{ pos['position'] }}</span>
+                        {% else %}
+                        <span class="position-other">{{ pos['position'] }}</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ pos['name'] }}</td>
+                    <td style="opacity: 0.7;">{{ pos['constructor'] }}</td>
+                    <td>{{ pos['laps'] }}</td>
+                    <td>{{ pos['status'] }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% if last_updated %}
+    <p class="last-updated">Last updated: {{ last_updated }} UTC</p>
+    {% endif %}
+</div>
+{% endif %}
+
+{# User Projections - Sorted by projected points #}
+<div class="card">
+    <h3>📊 Prediction Leaderboard</h3>
+    <p style="font-size: 14px; opacity: 0.7; margin-bottom: 20px;">
+        Points: P1=10 · P2=6 · P3=4 · +1 for correct driver, wrong position
+    </p>
+    
+    {% for proj in user_projections %}
+    <div class="projection-card {% if current_user_projection and proj['user_id'] == current_user_projection['user_id'] %}highlight-row{% endif %}">
+        <div class="projection-header">
+            <div>
+                <strong>{{ proj['username'] }}</strong>
+                {% if current_user_projection and proj['user_id'] == current_user_projection['user_id'] %}
+                <span style="background: #e10600; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 10px; margin-left: 8px;">YOU</span>
+                {% endif %}
+            </div>
+            <div style="text-align: right;">
+                <div class="projection-points">
+                    {% if proj['projected_points']['projected_points'] > 0 %}
+                    {{ proj['projected_points']['projected_points'] }} pts
+                    {% else %}
+                    <span style="opacity: 0.5;">No points yet</span>
+                    {% endif %}
+                </div>
+                <div class="projection-range">
+                    Best: {{ proj['best_case'] }} · Worst: {{ proj['worst_case'] }}
+                </div>
+            </div>
+        </div>
+        
+        {# Show prediction details #}
+        <div style="display: flex; gap: 20px; font-size: 14px;">
+            <div>
+                P1: 
+                {% if proj['projected_points']['p1_match'] %}
+                <span class="points-exact">{{ proj['prediction']['p1_name'].split()[-1] }} ✓</span>
+                {% else %}
+                <span>{{ proj['prediction']['p1_name'].split()[-1] }}</span>
+                {% if proj['projected_points'].get('p1_current_pos', 99) <= 3 %}
+                <span class="points-driver">({{ proj['projected_points'].get('p1_current_pos', '?') }}°)</span>
+                {% else %}
+                <span class="points-none">(P{{ proj['projected_points'].get('p1_current_pos', '?') }})</span>
+                {% endif %}
+                {% endif %}
+            </div>
+            <div>
+                P2: 
+                {% if proj['projected_points']['p2_match'] %}
+                <span class="points-exact">{{ proj['prediction']['p2_name'].split()[-1] }} ✓</span>
+                {% else %}
+                <span>{{ proj['prediction']['p2_name'].split()[-1] }}</span>
+                {% if proj['projected_points'].get('p2_current_pos', 99) <= 3 %}
+                <span class="points-driver">({{ proj['projected_points'].get('p2_current_pos', '?') }}°)</span>
+                {% else %}
+                <span class="points-none">(P{{ proj['projected_points'].get('p2_current_pos', '?') }})</span>
+                {% endif %}
+                {% endif %}
+            </div>
+            <div>
+                P3: 
+                {% if proj['projected_points']['p3_match'] %}
+                <span class="points-exact">{{ proj['prediction']['p3_name'].split()[-1] }} ✓</span>
+                {% else %}
+                <span>{{ proj['prediction']['p3_name'].split()[-1] }}</span>
+                {% if proj['projected_points'].get('p3_current_pos', 99) <= 3 %}
+                <span class="points-driver">({{ proj['projected_points'].get('p3_current_pos', '?') }}°)</span>
+                {% else %}
+                <span class="points-none">(P{{ proj['projected_points'].get('p3_current_pos', '?') }})</span>
+                {% endif %}
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <p style="opacity: 0.6;">No predictions for this race yet.</p>
+    {% endfor %}
+</div>
+
+{# Driver Tracker - Shows your predicted drivers' current positions #}
+{% if current_user_projection and driver_track_status %}
+<div class="card">
+    <h3>👤 Your Driver Tracker</h3>
+    <div class="driver-tracker">
+        {% for key, status in driver_track_status.items() %}
+        <div class="driver-card">
+            <div class="driver-predicted">{{ key|upper }} predicted</div>
+            <div class="driver-name">{{ status['name'] }}</div>
+            <div class="driver-position 
+                {% if status['current_position'] == 1 %}position-1{% elif status['current_position'] == 2 %}position-2{% elif status['current_position'] == 3 %}position-3{% else %}position-other{% endif %}">
+                {% if status['current_position'] %}
+                P{{ status['current_position'] }}
+                {% else %}
+                <span style="opacity: 0.5;">—</span>
+                {% endif %}
+            </div>
+            {% if status['current_position'] and status['current_position'] != status['predicted_position'] %}
+            <div style="font-size: 10px; margin-top: 5px;">
+                {% if status['current_position'] < status['predicted_position'] %}
+                <span class="position-change-up">↑ Gain</span>
+                {% else %}
+                <span class="position-change-down">↓ Loss</span>
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+{% if last_updated %}
+<p class="last-updated">
+    Auto-refreshes every {{ refresh_interval }} seconds · Last API update: {{ last_updated }} UTC
+</p>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // LL-002: Auto-refresh every 30 seconds
+    setTimeout(function() {
+        window.location.reload();
+    }, {{ refresh_interval * 1000 }});
+</script>
+{% endblock %}
