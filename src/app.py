@@ -31,6 +31,14 @@ RESULTS_CHECK_DELAY_MIN = 90  # Only check races that started 90+ min ago
 MAX_RETRIES = 10
 RETRY_INTERVAL_SEC = 120
 
+# Live leaderboard configuration
+LIVE_REFRESH_INTERVAL_SEC = 30  # Auto-refresh every 30 seconds
+LIVE_RATE_LIMIT_SEC = 10  # Minimum time between API calls
+LIVE_CACHE_TTL_SEC = 5  # Cache live data for 5 seconds
+
+# Simple in-memory cache for live data (keyed by race_id)
+_live_data_cache = {}
+
 def auto_lock_races():
     """Set status to 'locked' for races that have started (open + date in past)."""
     try:
@@ -463,6 +471,235 @@ def has_races_pending_results(db):
     """True if any race is eligible for results check (started 90+ min ago, no results)."""
     return len(get_races_pending_results(db)) > 0
 
+# --- Live Leaderboard (LL-001 to LL-011) ---
+
+def _get_cached_live_data(race_id):
+    """Get cached live data if still valid."""
+    now = _now_utc()
+    if race_id in _live_data_cache:
+        cached = _live_data_cache[race_id]
+        age = (now - cached['timestamp']).total_seconds()
+        if age < LIVE_CACHE_TTL_SEC:
+            return cached['data']
+    return None
+
+
+def _set_cached_live_data(race_id, data):
+    """Cache live data with current timestamp."""
+    _live_data_cache[race_id] = {
+        'data': data,
+        'timestamp': _now_utc()
+    }
+
+
+def fetch_live_race_data(season, round_num):
+    """
+    Fetch live race standings from Ergast API.
+    Returns list of current driver positions or None if unavailable.
+    """
+    api_url = f"{app.config['F1_API_URL']}/{season}/{round_num}/results.json"
+    
+    try:
+        response = requests.get(api_url, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        
+        races = data.get('MRData', {}).get('RaceTable', {}).get('Races', [])
+        if not races:
+            return None
+        
+        results = races[0].get('Results', [])
+        if not results:
+            return None
+        
+        positions = []
+        for idx, result in enumerate(results):
+            driver = result.get('Driver', {})
+            constructor = result.get('Constructor', {})
+            positions.append({
+                'position': int(result.get('position', idx + 1)),
+                'driver_id': driver.get('driverId'),
+                'name': f"{driver.get('givenName', '')} {driver.get('familyName', '')}",
+                'code': driver.get('code', ''),
+                'constructor': constructor.get('name', ''),
+                'nationality': driver.get('nationality', ''),
+                'grid': result.get('grid', ''),
+                'laps': result.get('laps', ''),
+                'status': result.get('status', 'Finished'),
+                'points': result.get('points', '0'),
+                'fastest_lap': result.get('FastestLap', {}).get('lap', '') if isinstance(result.get('FastestLap'), dict) else '',
+            })
+        
+        return positions
+    except Exception as e:
+        app.logger.warning(f"Failed to fetch live race data: {e}")
+        return None
+
+
+def calculate_projected_points(prediction, current_positions):
+    """
+    Calculate projected points based on current race positions.
+    LL-003: Projected points calculation.
+    
+    Returns dict with:
+    - p1_match: bool
+    - p2_match: bool
+    - p3_match: bool
+    - exact_matches: int
+    - driver_matches: int
+    - projected_points: int
+    """
+    if not current_positions:
+        return {
+            'p1_match': False, 'p2_match': False, 'p3_match': False,
+            'exact_matches': 0, 'driver_matches': 0, 'projected_points': 0
+        }
+    
+    # Map driver_id to position for quick lookup
+    driver_positions = {p['driver_id']: p['position'] for p in current_positions}
+    
+    pred_p1 = str(prediction['p1_driver_id'])
+    pred_p2 = str(prediction['p2_driver_id'])
+    pred_p3 = str(prediction['p3_driver_id'])
+    
+    # Get predicted drivers' current positions (or default to 99 if not found)
+    p1_pos = driver_positions.get(pred_p1, 99)
+    p2_pos = driver_positions.get(pred_p2, 99)
+    p3_pos = driver_positions.get(pred_p3, 99)
+    
+    # Calculate points
+    p1_match = p1_pos == 1
+    p2_match = p2_pos == 2
+    p3_match = p3_pos == 3
+    
+    exact_matches = sum([p1_match, p2_match, p3_match])
+    
+    # Count driver matches (correct driver in podium, wrong position)
+    driver_matches = 0
+    predicted_drivers = {pred_p1, pred_p2, pred_p3}
+    podium_drivers = {p['driver_id'] for p in current_positions[:3] if p['position'] <= 3}
+    
+    for did in predicted_drivers:
+        if did in podium_drivers:
+            # Check if it's an exact match
+            if did == pred_p1 and p1_match:
+                continue
+            if did == pred_p2 and p2_match:
+                continue
+            if did == pred_p3 and p3_match:
+                continue
+            driver_matches += 1
+    
+    # Calculate points: P1=10, P2=6, P3=4, +1 for driver in podium wrong position
+    projected_points = 0
+    if p1_match:
+        projected_points += 10
+    if p2_match:
+        projected_points += 6
+    if p3_match:
+        projected_points += 4
+    projected_points += driver_matches
+    
+    return {
+        'p1_match': p1_match,
+        'p2_match': p2_match,
+        'p3_match': p3_match,
+        'exact_matches': exact_matches,
+        'driver_matches': driver_matches,
+        'projected_points': projected_points,
+        'p1_current_pos': p1_pos,
+        'p2_current_pos': p2_pos,
+        'p3_current_pos': p3_pos,
+    }
+
+
+def calculate_best_worst_case(prediction, current_positions):
+    """
+    Calculate best and worst case scenarios.
+    LL-005: Best/worst case projection.
+    
+    Best case: All predicted drivers finish in predicted positions (20 points max)
+    Worst case: Current points only (no more improvement possible)
+    """
+    if not current_positions:
+        return {'best': 0, 'worst': 0, 'current': 0}
+    
+    driver_positions = {str(p['driver_id']): p['position'] for p in current_positions}
+    
+    # Map predicted drivers to their positions
+    pred_p1 = str(prediction['p1_driver_id'])
+    pred_p2 = str(prediction['p2_driver_id'])
+    pred_p3 = str(prediction['p3_driver_id'])
+    
+    p1_curr = driver_positions.get(pred_p1, 99)
+    p2_curr = driver_positions.get(pred_p2, 99)
+    p3_curr = driver_positions.get(pred_p3, 99)
+    
+    # Calculate current points and remaining possible
+    current_points = 0
+    remaining_for_best = 0
+    
+    # P1 analysis: exact = 10, in podium wrong = 1, out = 0, remaining = 10
+    if p1_curr == 1:
+        current_points += 10
+        remaining_for_best += 0  # Already exact
+    elif p1_curr <= 3:
+        current_points += 1  # Driver in podium but wrong position
+        remaining_for_best += 9  # Could still get 9 more (10-1) if moves to P1
+    else:
+        remaining_for_best += 10  # Could still get 10 if gets P1
+    
+    # P2 analysis: exact = 6, in podium wrong = 1, out = 0, remaining = 6
+    if p2_curr == 2:
+        current_points += 6
+        remaining_for_best += 0
+    elif p2_curr <= 3:
+        current_points += 1
+        remaining_for_best += 5  # Could still get 5 more (6-1)
+    else:
+        remaining_for_best += 6  # Could still get 6 if gets P2
+    
+    # P3 analysis: exact = 4, in podium wrong = 1, out = 0, remaining = 4
+    if p3_curr == 3:
+        current_points += 4
+        remaining_for_best += 0
+    elif p3_curr <= 3:
+        current_points += 1
+        remaining_for_best += 3  # Could still get 3 more (4-1)
+    else:
+        remaining_for_best += 4  # Could still get 4 if gets P3
+    
+    # Best case: current points + remaining possible improvement
+    best_case = current_points + remaining_for_best
+    
+    # Worst case: current points (no more improvement)
+    worst_case = current_points
+    
+    return {
+        'best': best_case,
+        'worst': worst_case,
+        'current': current_points
+    }
+
+
+def get_user_predictions_for_race(db, race_id):
+    """Get all user predictions for a race with projected points."""
+    predictions = db.execute('''
+        SELECT p.*, u.username,
+               d1.name as p1_name, d1.driver_id as p1_driver_id_api,
+               d2.name as p2_name, d2.driver_id as p2_driver_id_api,
+               d3.name as p3_name, d3.driver_id as p3_driver_id_api
+        FROM predictions p
+        JOIN users u ON p.user_id = u.session_id
+        JOIN drivers d1 ON p.p1_driver_id = d1.id
+        JOIN drivers d2 ON p.p2_driver_id = d2.id
+        JOIN drivers d3 ON p.p3_driver_id = d1.id
+        WHERE p.race_id = ?
+        ORDER BY u.username
+    ''', (race_id,)).fetchall()
+    return predictions
+
+
 # Admin: only these usernames can lock races, enter results, etc.
 ADMIN_USERNAMES = {'brett'}
 
@@ -872,6 +1109,144 @@ def race_detail(slug):
                           result_names=result_names,
                           result_ids=result_ids or {},
                           scores_by_user=scores_by_user)
+
+
+@app.route('/race/<int:race_id>/live')
+def live_leaderboard(race_id):
+    """
+    Live race leaderboard page.
+    LL-001: /race/<id>/live page accessible during race.
+    LL-002: Auto-refresh every 30 seconds (handled in template).
+    LL-003: Projected points calculation.
+    LL-004: Position change highlights.
+    LL-005: Best/worst case projection.
+    LL-006: Driver tracker.
+    LL-007: Rate limiting (via caching).
+    LL-008: Graceful fallback if API unavailable.
+    """
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+    
+    db = get_db()
+    
+    # Get race info
+    race_row = db.execute('SELECT * FROM races WHERE id = ?', (race_id,)).fetchone()
+    if not race_row:
+        flash('Race not found', 'error')
+        return redirect(url_for('races'))
+    
+    has_results = db.execute('SELECT 1 FROM results WHERE race_id = ?', (race_id,)).fetchone() is not None
+    race = enrich_race_with_status(dict(race_row), has_results)
+    
+    # Only allow live view for locked races (during race)
+    if race['status'] == 'completed':
+        # If race is completed, redirect to race detail
+        return redirect(url_for('race_detail', slug=race_slug(race)))
+    
+    if race['status'] == 'open':
+        flash('Race has not started yet', 'error')
+        return redirect(url_for('races'))
+    
+    # Check if we have cached live data (rate limiting)
+    cached_positions = _get_cached_live_data(race_id)
+    
+    if cached_positions is not None:
+        live_positions = cached_positions
+        api_available = True
+        last_updated = _live_data_cache[race_id]['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+    else:
+        # Fetch fresh live data from API
+        season = app.config['F1_SEASON']
+        live_positions = fetch_live_race_data(season, race['round'])
+        
+        if live_positions:
+            _set_cached_live_data(race_id, live_positions)
+            api_available = True
+            last_updated = _now_utc().strftime('%Y-%m-%d %H:%M:%S')
+        else:
+            # LL-008: Graceful fallback - use empty/placeholder data
+            api_available = False
+            live_positions = []
+            last_updated = None
+    
+    # Get all predictions for this race with projected points
+    predictions = db.execute('''
+        SELECT p.*, u.username,
+               d1.name as p1_name, d1.driver_id as p1_api_id,
+               d2.name as p2_name, d2.driver_id as p2_api_id,
+               d3.name as p3_name, d3.driver_id as p3_api_id
+        FROM predictions p
+        JOIN users u ON p.user_id = u.session_id
+        JOIN drivers d1 ON p.p1_driver_id = d1.id
+        JOIN drivers d2 ON p.p2_driver_id = d2.id
+        JOIN drivers d3 ON p.p3_driver_id = d3.id
+        WHERE p.race_id = ?
+        ORDER BY u.username
+    ''', (race_id,)).fetchall()
+    
+    # Calculate projected points for each user
+    user_projections = []
+    for pred in predictions:
+        projected = calculate_projected_points(pred, live_positions)
+        best_worst = calculate_best_worst_case(pred, live_positions)
+        user_projections.append({
+            'username': pred['username'],
+            'user_id': pred['user_id'],
+            'prediction': pred,
+            'projected_points': projected,
+            'best_case': best_worst['best'],
+            'worst_case': best_worst['worst'],
+            'current_points': best_worst['current'],
+        })
+    
+    # Sort by projected points descending
+    user_projections.sort(key=lambda x: x['projected_points']['projected_points'], reverse=True)
+    
+    # Get current user's projection for highlighting
+    current_user_projection = None
+    for proj in user_projections:
+        if proj['user_id'] == user['session_id']:
+            current_user_projection = proj
+            break
+    
+    # Get driver's current positions for tracking (LL-006)
+    driver_track_status = {}
+    if current_user_projection:
+        pred = current_user_projection['prediction']
+        for did_key, api_id_key, name_key in [
+            ('p1', 'p1_api_id', 'p1_name'),
+            ('p2', 'p2_api_id', 'p2_name'),
+            ('p3', 'p3_api_id', 'p3_name'),
+        ]:
+            api_id = pred[api_id_key]
+            driver_name = pred[name_key]
+            
+            # Find current position
+            curr_pos = None
+            for pos in live_positions:
+                if pos['driver_id'] == api_id:
+                    curr_pos = pos['position']
+                    break
+            
+            driver_track_status[did_key] = {
+                'name': driver_name,
+                'current_position': curr_pos,
+                'predicted_position': int(did_key[1]),  # p1 -> 1, p2 -> 2, p3 -> 3
+            }
+    
+    return render_template(
+        'live_leaderboard.html',
+        race=race,
+        race_slug=race_slug(race),
+        live_positions=live_positions,
+        user_projections=user_projections,
+        current_user_projection=current_user_projection,
+        driver_track_status=driver_track_status,
+        api_available=api_available,
+        last_updated=last_updated,
+        refresh_interval=LIVE_REFRESH_INTERVAL_SEC,
+    )
 
 
 @app.route('/logout')
