@@ -4,8 +4,13 @@
 
 {% block content %}
 <div class="card">
-    <h2>🏆 Leaderboard</h2>
-    <p>Total scores after all completed races</p>
+    <h2>🏆 Leaderboard{% if season %} — Season {{ season }}{% endif %}</h2>
+    <p>Total scores{% if season %} after Season {{ season }} races{% else %} after all completed races{% endif %}</p>
+    {% if not season %}
+    <p><a href="?season=current">View current season</a> | <a href="?season=2025">2025</a> | <a href="?season=2024">2024</a></p>
+    {% else %}
+    <p><a href="/leaderboard">View all seasons</a></p>
+    {% endif %}
 </div>
 
 <div class="card">
