@@ -1461,6 +1461,20 @@ def before_request():
     auto_lock_races()
 
 
+@app.route('/admin/force-lock-race')
+def force_lock_race():
+    """Debug: force-lock a race by ID (for testing)."""
+    import os
+    if os.environ.get('ENVIRONMENT') == 'production':
+        return 'Not available in production', 403
+    race_id = request.args.get('race_id', type=int)
+    if not race_id:
+        return 'race_id required', 400
+    db = get_db()
+    db.execute('UPDATE races SET status = ? WHERE id = ? AND status = ?', ('locked', race_id, 'open'))
+    db.commit()
+    return f'Race {race_id} locked', 200
+
 # Initialize database on startup
 with app.app_context():
     init_db()
