@@ -885,13 +885,22 @@ def set_username():
         # Reuse existing user's session_id
         session_id = existing['session_id']
     else:
-        # Create new user with new session_id
+        # Create new user. If another request already inserted this username
+        # (race condition), INSERT OR IGNORE will silently skip — then we do
+        # a second SELECT to find the winner's session_id.
         session_id = str(uuid.uuid4())
         db.execute(
-            'INSERT INTO users (session_id, username) VALUES (?, ?)',
+            'INSERT OR IGNORE INTO users (session_id, username) VALUES (?, ?)',
             (session_id, username)
         )
         db.commit()
+        # If IGNORE skipped (username existed), fetch its session_id
+        if not db.execute('SELECT 1 FROM users WHERE username = ? AND session_id = ?',
+                          (username, session_id)).fetchone():
+            row = db.execute('SELECT session_id FROM users WHERE username = ?',
+                             (username,)).fetchone()
+            if row:
+                session_id = row['session_id']
 
     session['session_id'] = session_id
     return redirect(url_for('home'))
