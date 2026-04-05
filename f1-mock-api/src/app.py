@@ -69,6 +69,7 @@ def init_db():
             date TEXT,
             time TEXT,
             start_override TEXT,
+            finish_override TEXT,
             has_results INTEGER DEFAULT 0,
             p1_driver_id TEXT,
             p2_driver_id TEXT,
@@ -274,7 +275,13 @@ def _driver_to_ergast(drv_row):
 
 
 def _get_results_for_race(season, round_no):
-    """Build Ergast Results array for a race from podium (p1,p2,p3)."""
+    """Build Ergast Results array for a race from podium (p1,p2,p3).
+    
+    Results are only returned if:
+    1. has_results=1 AND
+    2. finish_override is null (immediate) OR now >= finish_override
+    """
+    from datetime import datetime, timezone
     db = get_db()
     race = db.execute(
         "SELECT * FROM races WHERE season = ? AND round = ?",
@@ -282,6 +289,13 @@ def _get_results_for_race(season, round_no):
     ).fetchone()
     if not race or not race["has_results"]:
         return []
+    
+    # Check finish_override — results delayed until this time
+    finish_override = race.get("finish_override")
+    if finish_override:
+        finish_dt = datetime.fromisoformat(finish_override.replace("Z", "+00:00"))
+        if datetime.now(timezone.utc) < finish_dt:
+            return []  # Too early, results not yet available
 
     p1, p2, p3 = race["p1_driver_id"], race["p2_driver_id"], race["p3_driver_id"]
     if not any((p1, p2, p3)):
@@ -429,19 +443,20 @@ def admin():
         (season,),
     ).fetchall()
 
-    # Format start_override for datetime-local input (YYYY-MM-DDTHH:mm)
+    # Format start_override and finish_override for datetime-local input (YYYY-MM-DDTHH:mm)
     race_list = []
     for r in races:
         d = dict(r)
-        so = d.get("start_override")
-        if so:
-            try:
-                dt = datetime.fromisoformat(so.replace("Z", "+00:00"))
-                d["start_override_input"] = dt.strftime("%Y-%m-%dT%H:%M")
-            except Exception:
-                d["start_override_input"] = so[:16] if len(so) >= 16 else so
-        else:
-            d["start_override_input"] = ""
+        for field in ("start_override", "finish_override"):
+            val = d.get(field)
+            if val:
+                try:
+                    dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+                    d[field + "_input"] = dt.strftime("%Y-%m-%dT%H:%M")
+                except Exception:
+                    d[field + "_input"] = val[:16] if len(val) >= 16 else val
+            else:
+                d[field + "_input"] = ""
         race_list.append(d)
 
     return render_template(
@@ -461,6 +476,27 @@ def admin_set_start(race_id: int):
     db.execute("UPDATE races SET start_override = ? WHERE id = ?", (override or None, race_id))
     db.commit()
     flash("Start time updated" if override else "Start time cleared")
+    return redirect(url_for("admin", season=request.form.get("season", "")))
+
+
+@app.route("/admin/race/<int:race_id>/finish", methods=["POST"])
+def admin_set_finish(race_id: int):
+    """Set race finish time — results only visible after this datetime.
+    
+    Also sets has_results=1 so f1-predictor knows results are coming.
+    """
+    override = request.form.get("finish_override", "").strip()
+    db = get_db()
+    if override:
+        db.execute(
+            "UPDATE races SET finish_override = ?, has_results = 1 WHERE id = ?",
+            (override, race_id),
+        )
+        flash(f"Finish scheduled: {override}")
+    else:
+        db.execute("UPDATE races SET finish_override = NULL WHERE id = ?", (race_id,))
+        flash("Finish time cleared")
+    db.commit()
     return redirect(url_for("admin", season=request.form.get("season", "")))
 
 
@@ -487,6 +523,94 @@ def admin_unfinish_race(race_id: int):
     return redirect(url_for("admin", season=request.form.get("season", "")))
 
 
+@app.route("/admin/seed-test-races", methods=["POST"])
+def admin_seed_test_races():
+    """Replace rounds 1-4 of 2026 season with 4 test races on Apr 5 MDT.
+    
+    Each race: 15-min window. Start → lock → (15 min) → results visible.
+    Times (MDT = UTC-6):
+      Race 1: 7:30  → 7:45 MDT  (13:30 → 13:45 UTC)
+      Race 2: 8:00  → 8:15 MDT  (14:00 → 14:15 UTC)
+      Race 3: 8:30  → 8:45 MDT  (14:30 → 14:45 UTC)
+      Race 4: 9:00  → 9:15 MDT  (15:00 → 15:15 UTC)
+    """
+    db = get_db()
+    
+    races = [
+        {
+            "round": "1", "race_name": "Test Race 1",
+            "circuit_id": "albert_park", "circuit_name": "Albert Park Circuit",
+            "locality": "Melbourne", "country": "Australia",
+            "date": "2026-04-05", "time": "13:30:00",
+            "start_override": "2026-04-05T13:30:00",
+            "finish_override": "2026-04-05T13:45:00",
+            "p1": "max_verstappen", "p2": "lando_norris", "p3": "george_russell",
+        },
+        {
+            "round": "2", "race_name": "Test Race 2",
+            "circuit_id": "shanghai", "circuit_name": "Shanghai International Circuit",
+            "locality": "Shanghai", "country": "China",
+            "date": "2026-04-05", "time": "14:00:00",
+            "start_override": "2026-04-05T14:00:00",
+            "finish_override": "2026-04-05T14:15:00",
+            "p1": "charles_leclerc", "p2": "oscar_piastri", "p3": "carlos_sainz",
+        },
+        {
+            "round": "3", "race_name": "Test Race 3",
+            "circuit_id": "suzuka", "circuit_name": "Suzuka International Racing Course",
+            "locality": "Suzuka", "country": "Japan",
+            "date": "2026-04-05", "time": "14:30:00",
+            "start_override": "2026-04-05T14:30:00",
+            "finish_override": "2026-04-05T14:45:00",
+            "p1": "lewis_hamilton", "p2": "fernando_alonso", "p3": "lando_norris",
+        },
+        {
+            "round": "4", "race_name": "Test Race 4",
+            "circuit_id": "bahrain", "circuit_name": "Bahrain International Circuit",
+            "locality": "Sakhir", "country": "Bahrain",
+            "date": "2026-04-05", "time": "15:00:00",
+            "start_override": "2026-04-05T15:00:00",
+            "finish_override": "2026-04-05T15:15:00",
+            "p1": "max_verstappen", "p2": "charles_leclerc", "p3": "oscar_piastri",
+        },
+    ]
+    
+    # Ensure all needed drivers exist for 2026
+    needed_drivers = {
+        "max_verstappen": ("VER", "Max", "Verstappen", "Netherlands"),
+        "lando_norris": ("NOR", "Lando", "Norris", "United Kingdom"),
+        "george_russell": ("RUS", "George", "Russell", "United Kingdom"),
+        "charles_leclerc": ("LEC", "Charles", "Leclerc", "Monaco"),
+        "oscar_piastri": ("PIA", "Oscar", "Piastri", "Australia"),
+        "carlos_sainz": ("SAI", "Carlos", "Sainz", "Spain"),
+        "lewis_hamilton": ("HAM", "Lewis", "Hamilton", "United Kingdom"),
+        "fernando_alonso": ("ALO", "Fernando", "Alonso", "Spain"),
+    }
+    for did, (code, given, family, nat) in needed_drivers.items():
+        db.execute("""
+            INSERT OR IGNORE INTO drivers
+            (season, driver_id, code, given_name, family_name, nationality)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, ("2026", did, code, given, family, nat))
+    
+    for r in races:
+        db.execute("""
+            INSERT OR REPLACE INTO races
+            (season, round, race_name, circuit_id, circuit_name,
+             locality, country, lat, long, race_url,
+             date, time, start_override, finish_override,
+             has_results, p1_driver_id, p2_driver_id, p3_driver_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '', ?, ?, ?, ?, 1, ?, ?, ?)
+        """, ("2026", r["round"], r["race_name"], r["circuit_id"], r["circuit_name"],
+              r["locality"], r["country"], r["date"], r["time"],
+              r["start_override"], r["finish_override"],
+              r["p1"], r["p2"], r["p3"]))
+    
+    db.commit()
+    flash("Seeded 4 x 15-min test races for Apr 5 2026 (all MDT)")
+    return redirect(url_for("admin", season="2026"))
+
+
 @app.route("/admin/reseed", methods=["POST"])
 def admin_reseed():
     """Clear DB and re-seed from real Ergast API."""
@@ -501,6 +625,92 @@ def admin_reseed():
     else:
         flash("Reseed failed", "error")
     return redirect(url_for("admin", season=season))
+
+
+@app.route("/admin/seed-test-races", methods=["POST"])
+def admin_seed_test_races():
+    """Insert 4 test races for today with 15-min race windows.
+    
+    Sets start_override and finish_override for each.
+    Also sets has_results=1 with random podium so results appear after finish.
+    """
+    db = get_db()
+    
+    # Clear existing test races (season = 'test')
+    db.execute("DELETE FROM races WHERE season = 'test'")
+    db.commit()
+    
+    # 4 races: start at 7:30, 8:00, 8:30, 9:00 MDT (13:00, 14:00, 14:30, 15:00 UTC)
+    # Each runs 15 min, results visible after finish
+    races = [
+        {
+            "round": "1", "race_name": "Test Race 1 - Morning Sprint",
+            "circuit_name": "Test Circuit A",
+            "date": "2026-04-05", "time": "13:30:00",
+            "start_override": "2026-04-05T13:30:00",
+            "finish_override": "2026-04-05T13:45:00",
+            "p1": "max_verstappen", "p2": "lando_norris", "p3": "george_russell",
+        },
+        {
+            "round": "2", "race_name": "Test Race 2 - Mid Morning",
+            "circuit_name": "Test Circuit B",
+            "date": "2026-04-05", "time": "14:00:00",
+            "start_override": "2026-04-05T14:00:00",
+            "finish_override": "2026-04-05T14:15:00",
+            "p1": "charles_leclerc", "p2": "oscar_piastri", "p3": "carlos_sainz",
+        },
+        {
+            "round": "3", "race_name": "Test Race 3 - Late Morning",
+            "circuit_name": "Test Circuit C",
+            "date": "2026-04-05", "time": "14:30:00",
+            "start_override": "2026-04-05T14:30:00",
+            "finish_override": "2026-04-05T14:45:00",
+            "p1": "lewis_hamilton", "p2": "fernando_alonso", "p3": "lando_norris",
+        },
+        {
+            "round": "4", "race_name": "Test Race 4 - Before Noon",
+            "circuit_name": "Test Circuit D",
+            "date": "2026-04-05", "time": "15:00:00",
+            "start_override": "2026-04-05T15:00:00",
+            "finish_override": "2026-04-05T15:15:00",
+            "p1": "max_verstappen", "p2": "charles_leclerc", "p3": "oscar_piastri",
+        },
+    ]
+    
+    # Seed season 'test'
+    db.execute("INSERT OR IGNORE INTO seasons (season) VALUES ('test')")
+    
+    # Ensure test drivers exist
+    drivers = [
+        ("max_verstappen", "VER", "Max", "Verstappen", "Netherlands"),
+        ("lando_norris", "NOR", "Lando", "Norris", "United Kingdom"),
+        ("george_russell", "RUS", "George", "Russell", "United Kingdom"),
+        ("charles_leclerc", "LEC", "Charles", "Leclerc", "Monaco"),
+        ("oscar_piastri", "PIA", "Oscar", "Piastri", "Australia"),
+        ("carlos_sainz", "SAI", "Carlos", "Sainz", "Spain"),
+        ("lewis_hamilton", "HAM", "Lewis", "Hamilton", "United Kingdom"),
+        ("fernando_alonso", "ALO", "Fernando", "Alonso", "Spain"),
+    ]
+    for did, code, given, family, nat in drivers:
+        db.execute(
+            "INSERT OR IGNORE INTO drivers (season, driver_id, code, given_name, family_name, nationality) VALUES (?, ?, ?, ?, ?, ?)",
+            ("test", did, code, given, family, nat)
+        )
+    
+    # Insert races
+    for r in races:
+        db.execute("""
+            INSERT INTO races (season, round, race_name, circuit_name, date, time,
+                               start_override, finish_override, has_results,
+                               p1_driver_id, p2_driver_id, p3_driver_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+        """, ("test", r["round"], r["race_name"], r["circuit_name"],
+              r["date"], r["time"], r["start_override"], r["finish_override"],
+              r["p1"], r["p2"], r["p3"]))
+    
+    db.commit()
+    flash(f"Seeded 4 test races for Apr 5, 2026 MDT")
+    return redirect(url_for("admin", season="test"))
 
 
 @app.route("/admin/race/<int:race_id>/podium", methods=["POST"])
