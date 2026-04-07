@@ -2,82 +2,211 @@
 
 {% block title %}{{ race_slug }} - F1 Predictor{% endblock %}
 
+{% block extra_css %}
+<style>
+    /* Mobile-responsive styles */
+    @media (max-width: 480px) {
+        .race-header-inner {
+            flex-direction: column;
+            align-items: flex-start !important;
+            gap: 10px;
+        }
+        
+        .race-header-inner .status {
+            margin-left: 0 !important;
+            margin-top: 5px;
+        }
+        
+        .table-scroll {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+        
+        .table-scroll table {
+            min-width: 400px;
+        }
+        
+        .table-scroll th,
+        .table-scroll td {
+            padding: 8px 6px;
+            font-size: 13px;
+        }
+        
+        .podium-results {
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .podium-item {
+            flex: 1;
+            min-width: 100px;
+        }
+        
+        .result-legend {
+            font-size: 11px !important;
+            line-height: 1.4;
+        }
+    }
+    
+    .race-header-inner {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    
+    .table-scroll {
+        overflow-x: auto;
+    }
+    
+    .podium-results {
+        display: flex;
+        justify-content: center;
+        gap: 20px;
+        margin: 15px 0;
+    }
+    
+    .podium-item {
+        flex: 1;
+        max-width: 150px;
+        text-align: center;
+        padding: 15px 10px;
+        border-radius: 8px;
+    }
+    
+    .podium-p1 {
+        background: linear-gradient(135deg, rgba(255, 215, 0, 0.2), rgba(255, 215, 0, 0.05));
+    }
+    
+    .podium-p2 {
+        background: linear-gradient(135deg, rgba(192, 192, 192, 0.2), rgba(192, 192, 192, 0.05));
+    }
+    
+    .podium-p3 {
+        background: linear-gradient(135deg, rgba(205, 127, 50, 0.2), rgba(205, 127, 50, 0.05));
+    }
+    
+    .podium-rank {
+        font-size: 24px;
+        margin-bottom: 5px;
+    }
+    
+    .podium-name {
+        font-size: 14px;
+        font-weight: bold;
+    }
+    
+    .result-legend {
+        font-size: 12px;
+        opacity: 0.7;
+        margin-top: 12px;
+    }
+    
+    .exact {
+        color: #e10600;
+        font-weight: bold;
+    }
+    
+    .close {
+        color: #ff8c00;
+    }
+    
+    .points-col {
+        min-width: 50px;
+    }
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="card">
-    <h2>🏁 {{ race['name'] }}</h2>
-    <p>
-        Round {{ race['round'] }} · {{ race['date'][:10] }}
-        <span class="status status-{{ race['status'] }}" style="margin-left: 10px;">{{ race['status']|upper }}</span>
-    </p>
+    <div class="race-header-inner">
+        <div>
+            <h2>🏁 {{ race['name'] }}</h2>
+            <p style="margin-top: 5px;">
+                Round {{ race['round'] }} · {{ race['date'][:10] }}
+            </p>
+        </div>
+        <span class="status status-{{ race['status'] }}">{{ race['status']|upper }}</span>
+    </div>
 </div>
 
 {% if result_names %}
 <div class="card">
     <h3>Result</h3>
-    <p style="font-size: 18px; margin-top: 10px;">
-        🥇 {{ result_names['p1_name'] }}<br>
-        🥈 {{ result_names['p2_name'] }}<br>
-        🥉 {{ result_names['p3_name'] }}
-    </p>
-    <p style="font-size: 12px; opacity: 0.7; margin-top: 12px;">
-        Points: P1=10 · P2=6 · P3=4 · +1 for correct driver, wrong position<br>
-        <span style="color: #e10600;">Red</span> = exact · <span style="color: #ff8c00;">Orange</span> = right driver, wrong position
+    <div class="podium-results">
+        <div class="podium-item podium-p1">
+            <div class="podium-rank">🥇</div>
+            <div class="podium-name">{{ result_names['p1_name'] }}</div>
+        </div>
+        <div class="podium-item podium-p2">
+            <div class="podium-rank">🥈</div>
+            <div class="podium-name">{{ result_names['p2_name'] }}</div>
+        </div>
+        <div class="podium-item podium-p3">
+            <div class="podium-rank">🥉</div>
+            <div class="podium-name">{{ result_names['p3_name'] }}</div>
+        </div>
+    </div>
+    <p class="result-legend">
+        <span class="exact">● Red</span> = exact · <span class="close">● Orange</span> = right driver, wrong position
+        · P1=10 · P2=6 · P3=4 · +1 bonus
     </p>
 </div>
 {% endif %}
 
 <div class="card">
     <h3>Predictions ({{ predictions|length }} voters)</h3>
-    <table>
-        <thead>
-            <tr>
-                <th>User</th>
-                <th>P1</th>
-                <th>P2</th>
-                <th>P3</th>
-                {% if result_names %}
-                <th>Points</th>
-                {% endif %}
-            </tr>
-        </thead>
-        <tbody>
-            {% for pred in predictions %}
-            <tr>
-                <td><strong>{{ pred['username'] }}</strong></td>
-                <td>
-                    {% if result_ids and pred['p1_driver_id'] == result_ids.get('p1_driver_id') %}
-                    <span style="color: #e10600;">{{ pred['p1_name'].split()[-1] }}</span>
-                    {% elif result_ids and (pred['p1_driver_id'] == result_ids.get('p2_driver_id') or pred['p1_driver_id'] == result_ids.get('p3_driver_id')) %}
-                    <span style="color: #ff8c00;">{{ pred['p1_name'].split()[-1] }}</span>
-                    {% else %}
-                    {{ pred['p1_name'].split()[-1] }}
+    <div class="table-scroll">
+        <table>
+            <thead>
+                <tr>
+                    <th>User</th>
+                    <th>P1</th>
+                    <th>P2</th>
+                    <th>P3</th>
+                    {% if result_names %}
+                    <th class="points-col">Pts</th>
                     {% endif %}
-                </td>
-                <td>
-                    {% if result_ids and pred['p2_driver_id'] == result_ids.get('p2_driver_id') %}
-                    <span style="color: #e10600;">{{ pred['p2_name'].split()[-1] }}</span>
-                    {% elif result_ids and (pred['p2_driver_id'] == result_ids.get('p1_driver_id') or pred['p2_driver_id'] == result_ids.get('p3_driver_id')) %}
-                    <span style="color: #ff8c00;">{{ pred['p2_name'].split()[-1] }}</span>
-                    {% else %}
-                    {{ pred['p2_name'].split()[-1] }}
+                </tr>
+            </thead>
+            <tbody>
+                {% for pred in predictions %}
+                <tr>
+                    <td><strong>{{ pred['username'] }}</strong></td>
+                    <td>
+                        {% if result_ids and pred['p1_driver_id'] == result_ids.get('p1_driver_id') %}
+                        <span class="exact">{{ pred['p1_name'].split()[-1] }}</span>
+                        {% elif result_ids and (pred['p1_driver_id'] == result_ids.get('p2_driver_id') or pred['p1_driver_id'] == result_ids.get('p3_driver_id')) %}
+                        <span class="close">{{ pred['p1_name'].split()[-1] }}</span>
+                        {% else %}
+                        {{ pred['p1_name'].split()[-1] }}
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if result_ids and pred['p2_driver_id'] == result_ids.get('p2_driver_id') %}
+                        <span class="exact">{{ pred['p2_name'].split()[-1] }}</span>
+                        {% elif result_ids and (pred['p2_driver_id'] == result_ids.get('p1_driver_id') or pred['p2_driver_id'] == result_ids.get('p3_driver_id')) %}
+                        <span class="close">{{ pred['p2_name'].split()[-1] }}</span>
+                        {% else %}
+                        {{ pred['p2_name'].split()[-1] }}
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if result_ids and pred['p3_driver_id'] == result_ids.get('p3_driver_id') %}
+                        <span class="exact">{{ pred['p3_name'].split()[-1] }}</span>
+                        {% elif result_ids and (pred['p3_driver_id'] == result_ids.get('p1_driver_id') or pred['p3_driver_id'] == result_ids.get('p2_driver_id')) %}
+                        <span class="close">{{ pred['p3_name'].split()[-1] }}</span>
+                        {% else %}
+                        {{ pred['p3_name'].split()[-1] }}
+                        {% endif %}
+                    </td>
+                    {% if result_names %}
+                    <td class="points-col">{{ scores_by_user.get(pred['user_id'], '—') }}</td>
                     {% endif %}
-                </td>
-                <td>
-                    {% if result_ids and pred['p3_driver_id'] == result_ids.get('p3_driver_id') %}
-                    <span style="color: #e10600;">{{ pred['p3_name'].split()[-1] }}</span>
-                    {% elif result_ids and (pred['p3_driver_id'] == result_ids.get('p1_driver_id') or pred['p3_driver_id'] == result_ids.get('p2_driver_id')) %}
-                    <span style="color: #ff8c00;">{{ pred['p3_name'].split()[-1] }}</span>
-                    {% else %}
-                    {{ pred['p3_name'].split()[-1] }}
-                    {% endif %}
-                </td>
-                {% if result_names %}
-                <td>{{ scores_by_user.get(pred['user_id'], '—') }}</td>
-                {% endif %}
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
 </div>
 
 <p>
