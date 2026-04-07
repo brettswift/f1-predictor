@@ -1,0 +1,227 @@
+{% extends "base.html" %}
+
+{% block title %}Live Leaderboard - F1 Predictor{% endblock %}
+
+{% block extra_css %}
+<style>
+    .live-badge {
+        display: inline-block;
+        background: #e10600;
+        color: #fff;
+        padding: 4px 12px;
+        border-radius: 12px;
+        font-size: 12px;
+        font-weight: bold;
+        animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.6; }
+    }
+
+    .countdown {
+        font-size: 14px;
+        color: #e10600;
+        font-weight: bold;
+    }
+
+    .race-card {
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 8px;
+        padding: 15px;
+        margin-bottom: 15px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .race-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 10px;
+    }
+
+    .race-name {
+        font-size: 18px;
+        font-weight: bold;
+    }
+
+    .race-date {
+        font-size: 12px;
+        opacity: 0.7;
+    }
+
+    .prediction-row {
+        display: flex;
+        gap: 20px;
+        font-size: 13px;
+        margin-top: 8px;
+    }
+
+    .prediction-item {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+    }
+
+    .points-badge {
+        background: rgba(255, 255, 255, 0.1);
+        padding: 2px 8px;
+        border-radius: 10px;
+        font-size: 12px;
+    }
+
+    .points-earned {
+        background: #00c853;
+        color: #000;
+        padding: 2px 8px;
+        border-radius: 10px;
+        font-size: 12px;
+        font-weight: bold;
+    }
+
+    .leaderboard-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 8px 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .leaderboard-row:last-child {
+        border-bottom: none;
+    }
+
+    .leaderboard-rank {
+        font-size: 14px;
+        font-weight: bold;
+        width: 30px;
+    }
+
+    .leaderboard-username {
+        flex: 1;
+    }
+
+    .leaderboard-score {
+        font-weight: bold;
+        color: #e10600;
+    }
+
+    .user-row {
+        background: rgba(225, 6, 0, 0.2);
+        border-radius: 4px;
+        padding: 8px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<meta http-equiv="refresh" content="{{ refresh_interval }}">
+<div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+            <h2>🏁 Live Leaderboard</h2>
+            <p style="opacity: 0.7; margin-top: 5px;">{{ season }} Season · Auto-refreshes every {{ refresh_interval }}s</p>
+        </div>
+        <div style="text-align: right;">
+            <div style="font-size: 24px; font-weight: bold; color: #e10600;">{{ user_total }}</div>
+            <div style="font-size: 12px; opacity: 0.7;">Your Total Points</div>
+        </div>
+    </div>
+</div>
+
+<div style="display: grid; grid-template-columns: 1fr 300px; gap: 20px;">
+    <!-- Races List -->
+    <div>
+        {% for race in races %}
+        <div class="race-card">
+            <div class="race-header">
+                <div>
+                    <div class="race-name">Round {{ race['round'] }}: {{ race['name'] }}</div>
+                    <div class="race-date">{{ race['date'][:10] }}</div>
+                </div>
+                <div>
+                    {% if race['status'] == 'locked' %}
+                    <span class="live-badge">🔴 LIVE</span>
+                    <a href="{{ url_for('live_leaderboard', race_id=race['id']) }}" class="btn" style="padding: 4px 8px; font-size: 11px; margin-left: 5px;">Watch</a>
+                    {% elif race['status'] == 'completed' %}
+                    <span class="status status-completed">COMPLETED</span>
+                    {% else %}
+                    <span class="status status-{{ race['status'] }}">{{ race['status']|upper }}</span>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if race['status'] == 'locked' %}
+                {% if race['id'] in predictions %}
+                <div style="margin-top: 10px;">
+                    <span style="font-size: 12px; opacity: 0.7;">Your prediction:</span>
+                    <div class="prediction-row">
+                        <div class="prediction-item">🥇 {{ predictions[race['id']]['p1_name'].split()[-1] }}</div>
+                        <div class="prediction-item">🥈 {{ predictions[race['id']]['p2_name'].split()[-1] }}</div>
+                        <div class="prediction-item">🥉 {{ predictions[race['id']]['p3_name'].split()[-1] }}</div>
+                    </div>
+                </div>
+                {% else %}
+                <div style="margin-top: 10px;">
+                    <a href="{{ url_for('predict', race_id=race['id']) }}" class="btn" style="padding: 6px 12px; font-size: 12px;">Make Prediction</a>
+                </div>
+                {% endif %}
+            {% elif race['status'] == 'completed' %}
+                {% if race['id'] in race_results %}
+                <div style="margin-top: 10px;">
+                    <div class="prediction-row">
+                        <div class="prediction-item">🥇 {{ race_results[race['id']]['p1_name'].split()[-1] }}</div>
+                        <div class="prediction-item">🥈 {{ race_results[race['id']]['p2_name'].split()[-1] }}</div>
+                        <div class="prediction-item">🥉 {{ race_results[race['id']]['p3_name'].split()[-1] }}</div>
+                    </div>
+                </div>
+                {% endif %}
+                {% if race['id'] in predictions %}
+                <div style="margin-top: 8px; display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-size: 12px; opacity: 0.7;">Your points:</span>
+                    <span class="points-earned">+{{ user_points_per_race.get(race['id'], 0) }}</span>
+                </div>
+                {% endif %}
+            {% else %}
+                <div style="margin-top: 10px;">
+                    {% if race['id'] in predictions %}
+                    <div class="prediction-row">
+                        <div class="prediction-item">🥇 {{ predictions[race['id']]['p1_name'].split()[-1] }}</div>
+                        <div class="prediction-item">🥈 {{ predictions[race['id']]['p2_name'].split()[-1] }}</div>
+                        <div class="prediction-item">🥉 {{ predictions[race['id']]['p3_name'].split()[-1] }}</div>
+                    </div>
+                    {% else %}
+                    <a href="{{ url_for('predict', race_id=race['id']) }}" class="btn" style="padding: 6px 12px; font-size: 12px;">Predict</a>
+                    {% endif %}
+                </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+
+    <!-- Aggregate Leaderboard -->
+    <div class="card" style="position: sticky; top: 20px; height: fit-content;">
+        <h3 style="margin-bottom: 15px;">🏆 Standings</h3>
+        {% for entry in leaderboard[:15] %}
+        <div class="leaderboard-row {% if entry['session_id'] == current_user['session_id'] %}user-row{% endif %}">
+            <div class="leaderboard-rank">#{{ loop.index }}</div>
+            <div class="leaderboard-username">{{ entry['username'] }}</div>
+            <div class="leaderboard-score">{{ entry['total_score'] }}</div>
+        </div>
+        {% endfor %}
+        {% if leaderboard|length > 15 %}
+        <div style="text-align: center; margin-top: 10px; font-size: 12px; opacity: 0.7;">
+            + {{ leaderboard|length - 15 }} more
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<script>
+// Auto-refresh handler
+setTimeout(function() {
+    window.location.reload();
+}, {{ refresh_interval * 1000 }});
+</script>
+{% endblock %}

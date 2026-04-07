@@ -1031,6 +1031,104 @@ def leaderboard():
                           current_user=user,
                           season=filter_year)
 
+@app.route('/live')
+def live():
+    """
+    Live leaderboard page showing all races and aggregate standings.
+    BUD-77: Implement /live leaderboard page.
+    - Shows all races for current season with lock/live status
+    - Live races show countdown timer to lock
+    - Locked races show final results
+    - User's predictions shown alongside each race
+    - Points calculated and displayed per race
+    - Aggregate leaderboard across all races
+    - Auto-refresh every 60 seconds
+    """
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+
+    db = get_db()
+    season = app.config['F1_SEASON']
+
+    # Get all races with computed status
+    all_races = get_races_with_computed_status(db)
+
+    # Filter to current season and add slug
+    races = []
+    for r in all_races:
+        if str(r['date'].year) == str(season):
+            r['slug'] = race_slug(r)
+            races.append(r)
+
+    # Get current user's predictions for all races
+    predictions = {}
+    for race in races:
+        pred = db.execute('''
+            SELECT p.*, d1.name as p1_name, d1.driver_id as p1_api_id,
+                   d2.name as p2_name, d2.driver_id as p2_api_id,
+                   d3.name as p3_name, d3.driver_id as p3_api_id
+            FROM predictions p
+            JOIN drivers d1 ON p.p1_driver_id = d1.id
+            JOIN drivers d2 ON p.p2_driver_id = d2.id
+            JOIN drivers d3 ON p.p3_driver_id = d3.id
+            WHERE p.user_id = ? AND p.race_id = ?
+        ''', (user['session_id'], race['id'])).fetchone()
+        predictions[race['id']] = dict(pred) if pred else None
+
+    # Get race results for completed races
+    race_results = {}
+    for race in races:
+        if race['status'] == 'completed':
+            result = db.execute('''
+                SELECT d1.name as p1_name, d2.name as p2_name, d3.name as p3_name
+                FROM results r
+                JOIN drivers d1 ON r.p1_driver_id = d1.id
+                JOIN drivers d2 ON r.p2_driver_id = d2.id
+                JOIN drivers d3 ON r.p3_driver_id = d3.id
+                WHERE r.race_id = ?
+            ''', (race['id'],)).fetchone()
+            race_results[race['id']] = dict(result) if result else None
+
+    # Calculate user's points per race
+    user_points_per_race = {}
+    for race in races:
+        if race['status'] == 'completed':
+            score = db.execute(
+                'SELECT points FROM scores WHERE user_id = ? AND race_id = ?',
+                (user['session_id'], race['id'])
+            ).fetchone()
+            user_points_per_race[race['id']] = score['points'] if score else 0
+
+    # Calculate aggregate leaderboard
+    leaderboard = db.execute('''
+        SELECT u.session_id, u.username,
+               COALESCE(SUM(s.points), 0) as total_score
+        FROM users u
+        LEFT JOIN scores s ON u.session_id = s.user_id
+        LEFT JOIN races r ON s.race_id = r.id AND strftime('%Y', r.date) = ?
+        GROUP BY u.session_id
+        ORDER BY total_score DESC
+    ''', (str(season),)).fetchall()
+
+    # Calculate user's total score
+    user_total = 0
+    for row in leaderboard:
+        if row['session_id'] == user['session_id']:
+            user_total = row['total_score']
+            break
+
+    return render_template('live.html',
+                          races=races,
+                          predictions=predictions,
+                          race_results=race_results,
+                          user_points_per_race=user_points_per_race,
+                          leaderboard=leaderboard,
+                          user_total=user_total,
+                          current_user=user,
+                          season=season,
+                          refresh_interval=60)
+
 @app.route('/races')
 def races():
     """Show all races and their status."""
