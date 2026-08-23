@@ -45,7 +45,9 @@ Brett's idea: use a cheap model (DeepSeek v4 Flash) to regularly pull sentiment 
 3. **Cheap to run.** Matches his monetization reality — a scheduled cron pulling a few sources and summarizing with a cheap model is low-cost compared to trying to buy reliable official data.
 4. **Feeds back into the core loop.** Sentiment can be shown as a soft signal ("62% of predictors + sentiment lean toward Verstappen for pole") without replacing user predictions — adds flavor without adding complexity to scoring.
 
-**Open questions on this feature** (for the single-question flow below, or for Opus): which sources are fair game to scrape (Reddit API terms, forum ToS), how often to refresh, whether sentiment is shown pre-lock only or all the time, and whether it's purely descriptive or ever influences scoring/badges.
+**Decided**: use Reddit's official API (free tier, OAuth app registration) rather than raw scraping — Brett only needs a poll every couple of hours, well within Reddit's free-tier terms, and using the official API avoids the ToS/rate-limit risk of unauthorized scraping. Poll a handful of F1-relevant subreddits (e.g. r/formula1) every 2-3 hours, summarize with DeepSeek v4 Flash.
+
+**Still open for Opus**: whether sentiment is shown pre-lock only or all the time, and whether it's purely descriptive or ever influences scoring/badges. Other forum sources beyond Reddit are optional/stretch, not required for v1.
 
 ## Other Retention/Engagement Ideas Worth Investigating
 
@@ -69,9 +71,9 @@ Brett asked to be interviewed **one question at a time**, not in batches. Track 
 - [x] Timeline — none this year, confirmed
 - [x] Groups/leagues — confirmed net-new, no existing schema for it
 - [→] How far do "extras" predictions go beyond safety car? (DNFs, fastest lap, quali order?) — **deferred to Opus**. Brett doesn't have a firm answer; this is a launch-scope call, not a preference to extract now. Opus should propose a recommendation as part of the strategy pass rather than wait on this.
-- [ ] Sentiment dashboard: which sources, refresh cadence, does it ever affect scoring?
-- [ ] Which of the "other retention ideas" above (if any) does Brett actually want considered, vs. skip?
+- [x] Sentiment dashboard source/cadence — Reddit official API, poll every 2-3 hours, DeepSeek v4 Flash for summarization.
+- [→] Which of the "other retention ideas" above (if any) to build — **deferred to Opus**. It's a brainstorm list for the strategy pass to weigh/prioritize, not a pre-decided menu.
 
 ## Next Step
 
-Continue single-question interview in chat until the open questions above are resolved (or explicitly deferred to Opus), then hand this brief to Opus for the full feature/architecture strategy pass, then Fable for a voice/UX/engagement review pass.
+Interview is effectively complete — every question is either answered or explicitly deferred to Opus with a note on what to decide. Ready to hand this brief to Opus for the full feature/architecture strategy pass, then Fable for a voice/UX/engagement review pass.
