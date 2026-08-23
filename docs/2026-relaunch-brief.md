@@ -66,9 +66,9 @@ Brett asked to be interviewed **one question at a time**, not in batches. Track 
 - [x] Audience (general public via search/ads, groups + solo)
 - [x] Data source (OpenF1, free tier)
 - [x] Monetization (ads → later sponsorship, modest expectations)
-- [ ] Timeline — none this year, confirmed
-- [ ] How far do "extras" predictions go beyond safety car? (DNFs, fastest lap, quali order?)
-- [ ] Does a groups/leagues concept already exist in the current schema, or is it net-new?
+- [x] Timeline — none this year, confirmed
+- [x] Groups/leagues — confirmed net-new, no existing schema for it
+- [→] How far do "extras" predictions go beyond safety car? (DNFs, fastest lap, quali order?) — **deferred to Opus**. Brett doesn't have a firm answer; this is a launch-scope call, not a preference to extract now. Opus should propose a recommendation as part of the strategy pass rather than wait on this.
 - [ ] Sentiment dashboard: which sources, refresh cadence, does it ever affect scoring?
 - [ ] Which of the "other retention ideas" above (if any) does Brett actually want considered, vs. skip?
 
