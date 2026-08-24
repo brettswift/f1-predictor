@@ -121,16 +121,22 @@ Story IDs are provisional (`F1-xx`); renumber if/when imported to Linear.
 
 **Deliberately not** a branch of the real app: touching Flask templates means fighting real data, real routes and real state while the *look* is still in flux. Prototype until the design is agreed, then port the winning direction into templates as part of E7.
 
-- **F1-00** Two competing clickable concepts published (Concept A "Pit Wall" broadcast/timing-tower, Concept B "The Grid Report" editorial/narrative), covering Home, Predict, Leagues, Global. AC: real 2026 grid data, mock scores/sentiment, all navigation and podium-picking interactive. **DONE** — see links below.
-- **F1-01a** Feedback round(s) on the two concepts → pick a direction (or a hybrid). AC: one agreed direction, written down.
+- **F1-00** Two competing clickable concepts published (Concept A "Pit Wall" broadcast/timing-tower, Concept B "The Grid Report" editorial/narrative), covering Home, Predict, Leagues, Global. AC: real 2026 grid data, mock scores/sentiment, all navigation and podium-picking interactive. **DONE.**
+- **F1-00b** Direction decided: **Pit Wall wins.** "The Grid Report" editorial concept is dropped. **F1-00b is DONE.**
+- **F1-00c** Second iteration: rebuilt the losing slot to explore a better sentiment visualization within the Pit Wall system (same CSS/layout as the winning concept, not a competing aesthetic anymore). Replaced the tabular timing-tower sentiment list with a **sentiment grid** — driver tiles sized/glowing by buzz intensity, laid out like an actual starting grid (P1 full-width, then paired rows), team-colour heat instead of numeric rows. Explicitly not a tag cloud (rejected) and not another list. **DONE** — see links below.
+- **F1-00d** Feedback on the sentiment-grid treatment vs. the original tower list → pick final sentiment presentation.
 - **F1-02a** Prototype the remaining key screens in the chosen language: sign-up/magic-link, league invite landing (cold-visitor view), post-race results + share card, empty states (pre-season, no picks yet, brand-new league). AC: a stranger could click through the whole product.
 - **F1-03a** Extract the agreed design into tokens (colour, type scale, spacing, component list) to hand to E7. AC: `docs/design-system.md` written from the winning prototype, not invented separately.
 
 **Prototype environment**
-- Build dir: `/tmp/f1-mock-a`, `/tmp/f1-mock-b` (self-contained `index.html` + `data.js`, no build step, no dependencies).
+- Build dir: `/tmp/f1-mock-a`, `/tmp/f1-mock-b` (self-contained `index.html` + `data.js`, no build step, no dependencies). B now shares A's exact CSS/JS base (copied after the direction decision) — it's a sentiment-treatment sandbox, not a second aesthetic.
 - Publish: `python3 ~/.openclaw/workspace/scripts/publish_ephemeral.py <slug> <dir> --ttl-days 90`
-- Live: <https://lab.home.brettswift.com/f1-mock-a/> · <https://lab.home.brettswift.com/f1-mock-b/>
+- Made externally reachable via the backend's public-share endpoint (the CLI script doesn't wrap `--public` yet despite the skill doc — see Known Issues below; called the API directly).
+- Live (external): <https://share.brettswift.com/f1-mock-a/> (**locked reference — no further edits**) · <https://share.brettswift.com/f1-mock-b/> (active sentiment sandbox)
+- Live (LAN): <https://lab.home.brettswift.com/f1-mock-a/> · <https://lab.home.brettswift.com/f1-mock-b/>
 - Mock data: real current grid pulled from OpenF1 `drivers`, plus invented scores/leagues/sentiment. Static hosting can't persist data — and doesn't need to; prototype state lives in JS memory, which is enough to judge design.
+
+**Known issue:** `~/.openclaw/workspace/scripts/publish_ephemeral.py` has no `--public`/`--unpublic` flags even though `skill/ephemeral-publish/SKILL.md` documents them — the backend `/public/<slug>` endpoint works fine when called directly, the CLI just never got the flags added. Small fix, not urgent; noted here so it doesn't get lost.
 
 **Sentiment placement decision (Brett):** sentiment appears on the **home/race page** and on the **predict page** (as context beside the picks). It does **not** appear on league pages — leagues are about your people, not the internet's opinion. Both prototypes implement this.
 
