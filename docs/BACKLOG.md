@@ -99,6 +99,7 @@ Both mechanisms read the same `scores` rows. No forked logic.
 ## 4. Release Plan
 
 ```
+Phase 0  now            Design prototype FIRST                          (E0)
 Phase 0  now            Foundation: OpenF1 swap, resilience, accounts   (E1, E2)
 Phase 1  rest of 2026   Private beta: leagues, scoring v2, real races   (E3, E5partial)
 Phase 2  winter break   Design overhaul, sentiment dashboard, SEO       (E7, E6, E8)
@@ -113,6 +114,25 @@ Initial release = everything tagged **[MVP]** below. Post-release = **[POST]**.
 ## 5. Epics & Stories
 
 Story IDs are provisional (`F1-xx`); renumber if/when imported to Linear.
+
+### E0 — Design Prototype (do this first) [MVP] — Phase 0
+
+**Why this is epic zero:** every other epic's UI is guesswork until the design language is settled. Cheapest possible loop — static HTML + hardcoded mock data published to the ephemeral site. No pod, no database, no auth, no k8s deploy. Edit file → republish → Brett refreshes. Iteration cost ≈ 30 seconds.
+
+**Deliberately not** a branch of the real app: touching Flask templates means fighting real data, real routes and real state while the *look* is still in flux. Prototype until the design is agreed, then port the winning direction into templates as part of E7.
+
+- **F1-00** Two competing clickable concepts published (Concept A "Pit Wall" broadcast/timing-tower, Concept B "The Grid Report" editorial/narrative), covering Home, Predict, Leagues, Global. AC: real 2026 grid data, mock scores/sentiment, all navigation and podium-picking interactive. **DONE** — see links below.
+- **F1-01a** Feedback round(s) on the two concepts → pick a direction (or a hybrid). AC: one agreed direction, written down.
+- **F1-02a** Prototype the remaining key screens in the chosen language: sign-up/magic-link, league invite landing (cold-visitor view), post-race results + share card, empty states (pre-season, no picks yet, brand-new league). AC: a stranger could click through the whole product.
+- **F1-03a** Extract the agreed design into tokens (colour, type scale, spacing, component list) to hand to E7. AC: `docs/design-system.md` written from the winning prototype, not invented separately.
+
+**Prototype environment**
+- Build dir: `/tmp/f1-mock-a`, `/tmp/f1-mock-b` (self-contained `index.html` + `data.js`, no build step, no dependencies).
+- Publish: `python3 ~/.openclaw/workspace/scripts/publish_ephemeral.py <slug> <dir> --ttl-days 90`
+- Live: <https://lab.home.brettswift.com/f1-mock-a/> · <https://lab.home.brettswift.com/f1-mock-b/>
+- Mock data: real current grid pulled from OpenF1 `drivers`, plus invented scores/leagues/sentiment. Static hosting can't persist data — and doesn't need to; prototype state lives in JS memory, which is enough to judge design.
+
+**Sentiment placement decision (Brett):** sentiment appears on the **home/race page** and on the **predict page** (as context beside the picks). It does **not** appear on league pages — leagues are about your people, not the internet's opinion. Both prototypes implement this.
 
 ### E1 — Data Foundation & Resilience [MVP] — Phase 0
 
