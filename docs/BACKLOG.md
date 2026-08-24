@@ -24,7 +24,7 @@ Either alone is weak: a bare prediction form is boring (Brett's own words), and 
 | Gap | Why it blocks launch |
 |-----|---------------------|
 | **No real user accounts** — users are a session cookie + username | Clear cookies = lose your history. No cross-device. No way to build groups. Duplicate usernames from different browsers already caused data-cleanup pain (see BUGS_AND_FIXES.md Bug 1). This is the single biggest blocker. |
-| **No groups/leagues** | Groups-of-friends is the primary audience *and* the only realistic growth loop (invites). Confirmed net-new in schema. |
+| **No groups/leagues** | Groups-of-friends is a primary audience *and* the only realistic growth loop (invites). Confirmed net-new in schema. Must be built as views over the global game (§3.5), not as separate instances. |
 | **Data source (Jolpica)** | Being replaced with OpenF1 (decided — see brief). No safety-car data on Jolpica at all. |
 | **Reliability is assumed, not engineered** | Auto-lock and score-update bugs already documented. Public + ads = these become user-facing broken promises. |
 | **Design** | Functional templates, not something anyone would screenshot or share. Brett's requirement: fantastic, streamlined, simple. |
@@ -54,7 +54,7 @@ This turns "season's half over, no deadline" from a weakness into the schedule.
 
 Ranked by expected yield, all cheap:
 
-1. **League invite loop** (primary). Every engaged user recruits their group. Make creating a league + sharing an invite link the *second* thing a new user sees (right after making their first prediction). This is the only channel that compounds.
+1. **League invite loop** (primary). Every engaged user recruits their group. Surface "start a league, invite your friends" immediately *after* a user's first prediction — offered, never required (solo play is a complete product, see §3.5). This is the only channel that compounds.
 2. **SEO long-tail via sentiment pages** (secondary, slow-burn). One auto-generated, well-designed page per race: "Who will win the 2027 Bahrain GP? Fan sentiment + predictions." These queries have real volume before every race and low competition for the sentiment angle. 24 races/year × evergreen structure = a content site that builds itself from the cron jobs.
 3. **Share cards** (amplifier). Auto-generated result images ("Nailed the Monaco podium 🏆 — 3-race streak") people post themselves. Turns bragging into distribution. No following needed — the users post, not Brett.
 4. **Launch-window one-shots**: Product Hunt / Hacker News "Show HN" at season-opener launch (a sentiment dashboard with an AI angle is HN-compatible), F1 Discord communities (many allow project sharing where subreddits don't), r/formula1 *Daily Discussion* threads are more permissive than top-level posts — participate as a fan, not a promoter.
@@ -72,7 +72,24 @@ Ranked by expected yield, all cheap:
 | 3. Merch | People *ask* or leagues get competitive | Print-on-demand (no inventory) league-champion shirts — "2027 [League Name] Champion" is a better product than site-brand merch. |
 | 4. Payouts/prizes | Far future | Legal complexity (gambling adjacency) — explicitly out of scope until it deserves real analysis. |
 
-### 3.5 Design direction (the "fantastic, streamlined" requirement)
+### 3.5 Core UX model: one game, many views (Brett's decision — not an assumption)
+
+**Leagues are filters over a single global game, not separate games.** Every user is always on the global leaderboard from the moment they make their first prediction. A league is a saved carve-out of that same data — same predictions, same per-race scores, same stats, filtered to a set of people. Nobody has to join a league to play, and joining one never moves you into a walled-off instance.
+
+Why this matters (and what it rules out):
+- **Solo users are first-class, not second-class.** A user who never joins a league has a complete product: global rank, season stats, per-race results. League membership is additive, never required.
+- **No duplicated scoring logic.** One prediction, one score, computed once. League standings are a `WHERE user IN (league members)` view — cheap to build, impossible to drift out of sync.
+- **You can belong to many leagues at once** (work, family, group chat) with no re-prediction. One pick counts everywhere.
+- **It rules out** per-league scoring rules, per-league prediction sets, or league-private predictions in v1 — those would fork the game and break "same stats."
+
+**The mid-season join problem** (raised by Brett: "if you join a league halfway you can still win the league"). A cumulative season total can't be fair to someone who joined at round 15 — pretending otherwise would be dishonest design. Two mechanisms solve the real cases without breaking shared scoring:
+
+1. **League start round.** A league is created with a scoring window (default: current round forward, optionally "whole season"). All members of that league are ranked on races from the start round onward, using the identical per-race scores. This covers the common case — a group discovers the site mid-season and wants a fair contest *among themselves* starting now.
+2. **Dual ranking + winnable short ladders.** Every leaderboard (global and league) offers **Total** (the season championship) and **Average points per race** (form). Plus a **per-race winner** on every race. A latecomer to an established league can't win a championship they missed half of, but they can top the form table and win individual races immediately — so there's always something winnable within one race weekend.
+
+Both mechanisms read the same `scores` rows. No forked logic.
+
+### 3.6 Design direction (the "fantastic, streamlined" requirement)
 
 - **Aesthetic**: dark, broadcast-graphics-inspired — the F1 TV timing-tower look (dark background, team-color accents, monospace numerals, motion used sparingly). Instantly signals "F1" without infringing anything.
 - **Principle**: the prediction flow is the hero. Three taps to a podium pick on mobile. Everything else (sentiment, stats, leagues) hangs off that spine.
@@ -117,16 +134,22 @@ The "reliable data source" requirement, correctly framed: resilience is our engi
 - **F1-13** Minimal profile: display name, avatar color/emoji, favorite driver (feeds design personalization later). AC: editable, shown on leaderboards.
 - **F1-14** Account deletion + data export. AC: self-serve delete; required for ads/privacy compliance later anyway.
 
-### E3 — Leagues [MVP] — Phase 1
+### E3 — Leagues as views over the global game [MVP] — Phase 1
 
-The growth loop. Highest product-priority epic.
+The growth loop. Highest product-priority epic. Implements the model in §3.5 — leagues filter the global game, they don't fork it.
 
-- **F1-20** Create league (name, emoji/color). AC: any signed-in user; creator is admin.
-- **F1-21** Invite link with join flow optimized for cold users. AC: opening an invite as a stranger shows league name + members + "make your first pick in 3 taps" — sign-up woven into first prediction, not a gate before it.
-- **F1-22** League leaderboard (season + per-race). AC: global leaderboard remains; league board is the default view for league members.
-- **F1-23** League admin basics: rename, remove member, transfer admin, delete. AC: all self-serve, no Brett involvement.
-- **F1-24** Head-to-head view: any two members' season accuracy compared. AC: linkable (fuel for group-chat trash talk).
-- **F1-25** [POST] League chat/comment thread per race. Deferred — group chats already exist elsewhere; don't rebuild WhatsApp.
+- **F1-19** Global leaderboard as a first-class destination (not a fallback). AC: every user, league or not, has a global rank and can browse global standings by Total and by Average; a user who never joins a league sees no empty states or "join a league to continue" prompts anywhere.
+- **F1-20** Create league (name, emoji/color, scoring window). AC: any signed-in user; creator is admin; scoring window defaults to "from the current round forward," with "whole season" as an explicit option.
+- **F1-21** Invite link with join flow optimized for cold users. AC: opening an invite as a stranger shows league name + members + "make your first pick in 3 taps" — sign-up woven into first prediction, not a gate before it. Declining/ignoring the league still lands them in the global game.
+- **F1-22** League standings as a filtered view of global scores. AC: league table is derived from the same `scores` rows as global — no separate scoring path; a member's points are identical in both views for the same race; standings respect the league's scoring window.
+- **F1-23** Dual ranking modes everywhere (global + league): **Total** (championship) and **Average points per race** (form). AC: toggle persists per user; Average requires a minimum of 2 scored races to appear ranked (avoids one-race 100% artifacts).
+- **F1-24** Per-race winner surfaced on every race, globally and per league. AC: "Race winner: X" shown on race results; gives any user — including someone who joined yesterday — something winnable within one weekend.
+- **F1-25** Multi-league membership. AC: a user can belong to N leagues; one prediction scores in all of them; league switcher in nav; no re-entry of picks ever.
+- **F1-26** League admin basics: rename, remove member, transfer admin, delete, leave league. AC: all self-serve, no Brett involvement; deleting a league never deletes predictions or global history.
+- **F1-27** Head-to-head view: any two users' season accuracy compared (works globally, not just within a league). AC: linkable — fuel for group-chat trash talk.
+- **F1-28** "Joined at round X" context in league tables. AC: latecomers are visibly contextualized rather than looking like they're losing badly; Average view is suggested when a member's race count is well below the league median.
+- **F1-29** [POST] Public/open leagues discoverable by solo users who want competition without knowing anyone. AC: browse + join open leagues.
+- **F1-29b** [POST] League chat/comment thread per race. Deferred — group chats already exist elsewhere; don't rebuild WhatsApp.
 
 ### E4 — Prediction Experience v2 [MVP] — Phase 3 (design in Phase 2)
 
@@ -201,7 +224,6 @@ Everything tagged [POST] above, plus, unprioritized until post-launch data exist
 
 - Live race-day experience (would need OpenF1 paid tier — only if traffic justifies)
 - Constructor/championship-long predictions (season-long bets between friends)
-- Public league discovery ("join a public league" for solo users who want competition)
 - Email digest: post-race results + your score + next race sentiment (retention loop)
 - Native share-to-story formats (vertical share cards)
 - i18n (F1's audience is global; ES/PT are the obvious first candidates)
