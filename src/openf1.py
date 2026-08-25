@@ -290,7 +290,12 @@ def get_podium(session_key: int, db=None) -> Optional[dict]:
 
 # Messages OpenF1 emits in the SafetyCar category. "VSC" is a virtual safety
 # car, which is a distinct thing from a full safety car and is counted apart.
-_SC_DEPLOY_TOKENS = ("SAFETY CAR DEPLOYED", "SAFETY CAR IN THIS LAP")
+#
+# Each intervention produces a deploy/end pair, verified against 2026 data:
+#   "SAFETY CAR DEPLOYED" -> "SAFETY CAR IN THIS LAP"  (the car comes IN)
+#   "VSC DEPLOYED"        -> "VSC ENDING"
+# Only the deploy side is counted, so one intervention counts once.
+_SC_DEPLOY_TOKENS = ("SAFETY CAR DEPLOYED",)
 _VSC_DEPLOY_TOKENS = ("VSC DEPLOYED",)
 
 
