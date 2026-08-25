@@ -42,6 +42,11 @@ RETRY_BACKOFF_SEC = float(os.environ.get("OPENF1_RETRY_BACKOFF_SEC", "1.5"))
 # A cached payload older than this is flagged stale so the UI can say so.
 CACHE_STALE_AFTER_SEC = int(os.environ.get("OPENF1_CACHE_STALE_SEC", str(6 * 3600)))
 
+# Offline mode: never touch the network, serve cache only. Used by the test
+# suite (tests must be deterministic and network-free) and available as an
+# operational kill switch if upstream needs to be left alone.
+OFFLINE = os.environ.get("OPENF1_OFFLINE", "false").lower() == "true"
+
 
 class OpenF1Error(RuntimeError):
     """Upstream failed and no usable cached payload was available."""
@@ -150,6 +155,12 @@ def _get(path: str, params: Optional[dict] = None,
     url = f"{OPENF1_BASE_URL}/{path.lstrip('/')}"
     key = _cache_key(path, params)
     last_exc: Optional[Exception] = None
+
+    if OFFLINE:
+        cached = _cache_read(db, key) if db is not None else None
+        if cached is not None:
+            return cached
+        raise OpenF1Error(f"OPENF1_OFFLINE is set and {key} is not cached")
 
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:

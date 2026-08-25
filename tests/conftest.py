@@ -8,7 +8,11 @@ import responses
 # Set environment variables BEFORE anything else
 os.environ['DATABASE_PATH'] = ':memory:'
 os.environ['TESTING'] = 'true'
-os.environ['F1_API_URL'] = 'https://api.jolpi.ca/ergast/f1'
+# Tests must be deterministic and network-free. Before this, init_db() called
+# the live upstream on every test setup, so the suite failed whenever the API
+# rate-limited us (6 tests failed with HTTP 429). Offline mode serves cache
+# only; tests that need data insert their own fixtures.
+os.environ['OPENF1_OFFLINE'] = 'true'
 
 # Add project root and src to path (root needed for 'from tests.utils...' imports)
 _root = os.path.dirname(os.path.dirname(__file__))

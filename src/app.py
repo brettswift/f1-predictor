@@ -16,6 +16,8 @@ from datetime import datetime, timezone, timedelta
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, session, g, flash, jsonify
 
+import openf1
+
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
 app.config['DATABASE'] = os.environ.get('DATABASE_PATH', '/data/f1_predictions.db')
@@ -24,7 +26,7 @@ app.config['DATABASE'] = os.environ.get('DATABASE_PATH', '/data/f1_predictions.d
 app.config['ENVIRONMENT'] = os.environ.get('ENVIRONMENT', 'dev')
 app.config['API_BASE_URL'] = os.environ.get('API_BASE_URL', '')
 app.config['USE_STUB_API'] = os.environ.get('USE_STUB_API', 'false').lower() == 'true'
-app.config['F1_API_URL'] = os.environ.get('F1_API_URL', 'https://api.jolpi.ca/ergast/f1')
+app.config['OPENF1_API_URL'] = openf1.OPENF1_BASE_URL
 app.config['F1_SEASON'] = int(os.environ.get('F1_SEASON', '2026'))
 app.config['DRIVER_REFRESH_SECRET'] = os.environ.get('DRIVER_REFRESH_SECRET', '')
 RESULTS_CHECK_DELAY_MIN = 90  # Only check races that started 90+ min ago
@@ -212,42 +214,76 @@ def init_db():
         )
     ''')
 
+    # Last-known-good cache for upstream reads (F1-02)
+    openf1.ensure_cache_table(db)
+
+    _apply_migrations(db)
+
     db.commit()
 
     # Lazy load from API on first startup
     ensure_drivers_loaded(db)
     ensure_races_loaded(db)
 
+
+def _column_names(db, table):
+    return {row[1] for row in db.execute(f'PRAGMA table_info({table})').fetchall()}
+
+
+def _apply_migrations(db):
+    """Additive schema migrations for databases created before a column existed.
+
+    CREATE TABLE IF NOT EXISTS silently does nothing on an existing table, so
+    new columns need an explicit ALTER. Every migration here is additive and
+    idempotent — safe to run on every startup.
+    """
+    races = _column_names(db, 'races')
+    if 'session_key' not in races:
+        # OpenF1 keys results by session_key; without it we cannot fetch results.
+        db.execute('ALTER TABLE races ADD COLUMN session_key INTEGER')
+        app.logger.info('Migration: races.session_key added')
+
+    results = _column_names(db, 'results')
+    for column, ddl in (
+        ('had_safety_car', 'ALTER TABLE results ADD COLUMN had_safety_car INTEGER'),
+        ('safety_car_count', 'ALTER TABLE results ADD COLUMN safety_car_count INTEGER'),
+        ('had_virtual_safety_car', 'ALTER TABLE results ADD COLUMN had_virtual_safety_car INTEGER'),
+        ('virtual_safety_car_count', 'ALTER TABLE results ADD COLUMN virtual_safety_car_count INTEGER'),
+        ('data_source', 'ALTER TABLE results ADD COLUMN data_source TEXT'),
+        ('recorded_at', 'ALTER TABLE results ADD COLUMN recorded_at TIMESTAMP'),
+    ):
+        if column not in results:
+            db.execute(ddl)
+            app.logger.info('Migration: results.%s added', column)
+
 # --- API fetching ---
 
-def fetch_drivers_from_api():
-    """Fetch drivers from F1 API."""
-    season = app.config['F1_SEASON']
-    api_url = f"{app.config['F1_API_URL']}/{season}/drivers.json"
-
+def fetch_drivers_from_api(db=None):
+    """Fetch the current driver grid from OpenF1."""
     try:
-        response = requests.get(api_url, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-
-        drivers = []
-        driver_list = data.get('MRData', {}).get('DriverTable', {}).get('Drivers', [])
-
-        for idx, driver in enumerate(driver_list, start=1):
-            drivers.append({
-                'id': idx,
-                'driver_id': driver.get('driverId'),
-                'name': f"{driver.get('givenName')} {driver.get('familyName')}",
-                'number': int(driver.get('permanentNumber', 0)),
-                'code': driver.get('code'),
-                'nationality': driver.get('nationality'),
-                'team': None
-            })
-
-        return drivers
-    except Exception as e:
-        app.logger.error(f"Failed to fetch drivers from API: {e}")
+        drivers_raw = openf1.get_drivers(season=app.config['F1_SEASON'], db=db).data
+    except openf1.OpenF1Error as e:
+        app.logger.error(f"Failed to fetch drivers from OpenF1: {e}")
         return None
+
+    drivers = []
+    for idx, driver in enumerate(drivers_raw, start=1):
+        number = driver.get('driver_number')
+        if number is None:
+            continue
+        name = openf1.driver_display_name(driver)
+        drivers.append({
+            'id': idx,
+            # OpenF1 has no stable slug; derive one so existing driver_id
+            # semantics (unique text key) still hold.
+            'driver_id': (driver.get('name_acronym') or name).lower().replace(' ', '_'),
+            'name': name,
+            'number': int(number),
+            'code': driver.get('name_acronym'),
+            'nationality': driver.get('country_code'),
+            'team': driver.get('team_name'),
+        })
+    return drivers or None
 
 def ensure_drivers_loaded(db):
     """Ensure drivers are loaded from API. Called on startup if empty."""
@@ -255,7 +291,7 @@ def ensure_drivers_loaded(db):
 
     if count == 0:
         app.logger.info("No drivers found - fetching from API...")
-        drivers = fetch_drivers_from_api()
+        drivers = fetch_drivers_from_api(db)
 
         if drivers:
             for driver in drivers:
@@ -276,33 +312,42 @@ def ensure_drivers_loaded(db):
         else:
             app.logger.error("Failed to load drivers from API - app may not function correctly")
 
-def fetch_races_from_api():
-    """Fetch race calendar from F1 API."""
+def fetch_races_from_api(db=None):
+    """
+    Fetch the race calendar from OpenF1.
+
+    Returns (name, round, date_str, session_key) tuples. session_key is what
+    results are later fetched with, so it is stored alongside the race.
+    """
     season = app.config['F1_SEASON']
-    api_url = f"{app.config['F1_API_URL']}/{season}.json"
-
     try:
-        response = requests.get(api_url, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-
-        races = []
-        race_list = data.get('MRData', {}).get('RaceTable', {}).get('Races', [])
-
-        for race in race_list:
-            race_name = race.get('raceName', 'Unknown')
-            round_num = int(race.get('round', 0))
-            date = race.get('date', '')
-            time = race.get('time', '12:00:00Z').replace('Z', '').strip()
-
-            if date:
-                date_str = f"{date} {time}" if time else f"{date} 12:00:00"
-                races.append((race_name, round_num, date_str))
-
-        return races
-    except Exception as e:
-        app.logger.error(f"Failed to fetch races from API: {e}")
+        sessions = openf1.get_race_sessions(season=season, db=db).data
+    except openf1.OpenF1Error as e:
+        app.logger.error(f"Failed to fetch races from OpenF1: {e}")
         return None
+
+    # Meeting names give "Australian Grand Prix" rather than "Melbourne".
+    meeting_names = {}
+    try:
+        for m in openf1.get_meetings(season=season, db=db).data:
+            meeting_names[m.get('meeting_key')] = m.get('meeting_name') or m.get('meeting_official_name')
+    except openf1.OpenF1Error:
+        app.logger.warning("Meeting names unavailable; falling back to circuit/country names")
+
+    races = []
+    for session_data in sessions:
+        name = (meeting_names.get(session_data.get('meeting_key'))
+                or session_data.get('circuit_short_name')
+                or session_data.get('country_name')
+                or 'Unknown')
+        date_start = session_data.get('date_start')
+        if not date_start:
+            continue
+        # Store naive UTC to match the existing datetime() comparisons in SQL.
+        date_str = date_start.replace('T', ' ')[:19]
+        races.append((name, session_data['round'], date_str, session_data.get('session_key')))
+
+    return races or None
 
 def ensure_races_loaded(db):
     """Ensure races are loaded from API. Called on startup if empty. No fallback."""
@@ -312,16 +357,16 @@ def ensure_races_loaded(db):
         return
 
     app.logger.info("No races found - fetching from API...")
-    races = fetch_races_from_api()
+    races = fetch_races_from_api(db)
 
     if not races:
         app.logger.error("Failed to fetch races from API - race table will remain empty")
         return
 
-    for name, round_num, date_str in races:
+    for name, round_num, date_str, session_key in races:
         db.execute(
-            'INSERT INTO races (name, round, date, status) VALUES (?, ?, ?, ?)',
-            (name, round_num, date_str, 'open')
+            'INSERT INTO races (name, round, date, status, session_key) VALUES (?, ?, ?, ?, ?)',
+            (name, round_num, date_str, 'open', session_key)
         )
 
     db.commit()
@@ -381,35 +426,68 @@ def refresh_drivers_from_api(db):
 
 # --- Results checking (user-triggered with browser auto-retry) ---
 
-def fetch_race_results_from_api(season, round_num):
-    """Fetch race results from F1 API. Returns dict with p1/p2/p3 driver_ids or None."""
-    api_url = f"{app.config['F1_API_URL']}/{season}/{round_num}/results.json"
-
+def _race_session_key(db, race):
+    """
+    session_key for a race, resolving lazily for rows seeded before the column
+    existed (or seeded by fixtures). Returns None when it cannot be resolved.
+    """
+    key = race['session_key'] if 'session_key' in race.keys() else None
+    if key:
+        return key
     try:
-        response = requests.get(api_url, timeout=30)
-        response.raise_for_status()
-        data = response.json()
+        for session_data in openf1.get_race_sessions(season=app.config['F1_SEASON'], db=db).data:
+            if session_data.get('round') == race['round']:
+                db.execute('UPDATE races SET session_key = ? WHERE id = ?',
+                           (session_data['session_key'], race['id']))
+                db.commit()
+                return session_data['session_key']
+    except openf1.OpenF1Error as e:
+        app.logger.warning(f"Could not resolve session_key for race {race['id']}: {e}")
+    return None
 
-        races = data.get('MRData', {}).get('RaceTable', {}).get('Races', [])
-        if not races:
-            return None
 
-        results = races[0].get('Results', [])
-        if len(results) < 3:
-            return None
+def fetch_race_results_from_api(db, race):
+    """
+    Podium for a race from OpenF1, as DB driver ids.
 
-        return {
-            'p1_driver_id': results[0]['Driver']['driverId'],
-            'p2_driver_id': results[1]['Driver']['driverId'],
-            'p3_driver_id': results[2]['Driver']['driverId']
-        }
-    except Exception:
+    Returns None when the race has not finished (or the drivers cannot be
+    matched), which callers treat as "try again later" rather than an error.
+    """
+    session_key = _race_session_key(db, race)
+    if not session_key:
+        return None
+    try:
+        podium = openf1.get_podium(session_key, db=db)
+    except openf1.OpenF1Error as e:
+        app.logger.warning(f"Results fetch failed for race {race['id']}: {e}")
+        return None
+    if not podium:
         return None
 
-def get_driver_db_id_by_api_id(db, api_driver_id):
-    """Get our DB driver id from API driverId."""
-    row = db.execute('SELECT id FROM drivers WHERE driver_id = ?', (api_driver_id,)).fetchone()
+    resolved = {}
+    for slot in ('p1', 'p2', 'p3'):
+        driver_db_id = get_driver_db_id_by_number(db, podium[slot]['driver_number'])
+        if driver_db_id is None:
+            app.logger.warning(
+                "Race %s: driver #%s (%s) not in drivers table — skipping ingest",
+                race['id'], podium[slot]['driver_number'], podium[slot]['driver_name'])
+            return None
+        resolved[f'{slot}_driver_id'] = driver_db_id
+
+    try:
+        resolved['safety_car'] = openf1.get_safety_car_summary(session_key, db=db)
+    except openf1.OpenF1Error:
+        resolved['safety_car'] = None
+    return resolved
+
+
+def get_driver_db_id_by_number(db, driver_number):
+    """DB driver id from a car number (how OpenF1 identifies drivers)."""
+    if driver_number is None:
+        return None
+    row = db.execute('SELECT id FROM drivers WHERE number = ?', (driver_number,)).fetchone()
     return row['id'] if row else None
+
 
 def get_races_pending_results(db, min_minutes_after_start=RESULTS_CHECK_DELAY_MIN):
     """Races that started min_minutes_after_start+ ago, no results in DB."""
@@ -433,21 +511,24 @@ def check_and_ingest_results(db):
     updated = []
 
     for race in pending:
-        podium = fetch_race_results_from_api(season, race['round'])
+        podium = fetch_race_results_from_api(db, race)
         if not podium:
             continue
 
-        p1_id = get_driver_db_id_by_api_id(db, podium['p1_driver_id'])
-        p2_id = get_driver_db_id_by_api_id(db, podium['p2_driver_id'])
-        p3_id = get_driver_db_id_by_api_id(db, podium['p3_driver_id'])
+        p1_id = podium['p1_driver_id']
+        p2_id = podium['p2_driver_id']
+        p3_id = podium['p3_driver_id']
 
-        if not all([p1_id, p2_id, p3_id]):
-            continue
-
+        sc = podium.get('safety_car') or {}
         db.execute('''
-            INSERT INTO results (race_id, p1_driver_id, p2_driver_id, p3_driver_id)
-            VALUES (?, ?, ?, ?)
-        ''', (race['id'], p1_id, p2_id, p3_id))
+            INSERT INTO results (race_id, p1_driver_id, p2_driver_id, p3_driver_id,
+                                 had_safety_car, safety_car_count,
+                                 had_virtual_safety_car, virtual_safety_car_count,
+                                 data_source, recorded_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'openf1', CURRENT_TIMESTAMP)
+        ''', (race['id'], p1_id, p2_id, p3_id,
+              1 if sc.get('had_safety_car') else 0, sc.get('safety_car_count'),
+              1 if sc.get('had_virtual_safety_car') else 0, sc.get('virtual_safety_car_count')))
 
         predictions = db.execute('SELECT * FROM predictions WHERE race_id = ?', (race['id'],)).fetchall()
         result_data = {'p1_driver_id': p1_id, 'p2_driver_id': p2_id, 'p3_driver_id': p3_id}
@@ -492,48 +573,51 @@ def _set_cached_live_data(race_id, data):
     }
 
 
-def fetch_live_race_data(season, round_num):
+def fetch_live_race_data(db, race):
     """
-    Fetch live race standings from Ergast API.
-    Returns list of current driver positions or None if unavailable.
+    Current classification for a race from OpenF1.
+
+    OpenF1 publishes session_result during a session, so this doubles as the
+    live standings feed. Returns None when nothing is published yet.
     """
-    api_url = f"{app.config['F1_API_URL']}/{season}/{round_num}/results.json"
-    
+    session_key = _race_session_key(db, race)
+    if not session_key:
+        return None
     try:
-        response = requests.get(api_url, timeout=15)
-        response.raise_for_status()
-        data = response.json()
-        
-        races = data.get('MRData', {}).get('RaceTable', {}).get('Races', [])
-        if not races:
-            return None
-        
-        results = races[0].get('Results', [])
+        results = openf1.get_session_result(session_key, db=db).data
         if not results:
             return None
-        
-        positions = []
-        for idx, result in enumerate(results):
-            driver = result.get('Driver', {})
-            constructor = result.get('Constructor', {})
-            positions.append({
-                'position': int(result.get('position', idx + 1)),
-                'driver_id': driver.get('driverId'),
-                'name': f"{driver.get('givenName', '')} {driver.get('familyName', '')}",
-                'code': driver.get('code', ''),
-                'constructor': constructor.get('name', ''),
-                'nationality': driver.get('nationality', ''),
-                'grid': result.get('grid', ''),
-                'laps': result.get('laps', ''),
-                'status': result.get('status', 'Finished'),
-                'points': result.get('points', '0'),
-                'fastest_lap': result.get('FastestLap', {}).get('lap', '') if isinstance(result.get('FastestLap'), dict) else '',
-            })
-        
-        return positions
-    except Exception as e:
+        drivers = {d.get('driver_number'): d
+                   for d in openf1.get_drivers(session_key=session_key, db=db).data}
+    except openf1.OpenF1Error as e:
         app.logger.warning(f"Failed to fetch live race data: {e}")
         return None
+
+    positions = []
+    for idx, row in enumerate(results):
+        driver = drivers.get(row.get('driver_number'), {})
+        status = 'Finished'
+        if row.get('dnf'):
+            status = 'DNF'
+        elif row.get('dns'):
+            status = 'DNS'
+        elif row.get('dsq'):
+            status = 'DSQ'
+        positions.append({
+            'position': int(row.get('position') or idx + 1),
+            'driver_id': (driver.get('name_acronym') or '').lower(),
+            'driver_number': row.get('driver_number'),
+            'name': openf1.driver_display_name(driver) if driver else f"#{row.get('driver_number')}",
+            'code': driver.get('name_acronym', ''),
+            'constructor': driver.get('team_name', ''),
+            'nationality': driver.get('country_code') or '',
+            'grid': '',
+            'laps': row.get('number_of_laps', ''),
+            'status': status,
+            'points': row.get('points', 0) or 0,
+            'fastest_lap': '',
+        })
+    return positions
 
 
 def calculate_projected_points(prediction, current_positions):
@@ -1309,8 +1393,7 @@ def live_leaderboard(race_id):
         last_updated = _live_data_cache[race_id]['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
     else:
         # Fetch fresh live data from API
-        season = app.config['F1_SEASON']
-        live_positions = fetch_live_race_data(season, race['round'])
+        live_positions = fetch_live_race_data(db, race)
         
         if live_positions:
             _set_cached_live_data(race_id, live_positions)
@@ -1480,7 +1563,10 @@ def delete_predictions():
     the given driver as P1. Used to remove duplicate/wrong 'brett' entries.
     """
     if request.method == 'GET':
-        return render_template('admin_delete_predictions.html')
+        # Driver list drives the P1 picker, so the admin can't typo a name that
+        # doesn't exist (which previously just flashed an error and bounced).
+        drivers = get_db().execute('SELECT id, name, number, team FROM drivers ORDER BY number').fetchall()
+        return render_template('admin_delete_predictions.html', drivers=drivers)
 
     username_pattern = (request.form.get('username_pattern') or request.args.get('username_pattern') or 'brett').strip()
     keep_p1_name = (request.form.get('keep_p1_name') or request.args.get('keep_p1_name') or 'Kimi').strip()

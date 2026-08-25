@@ -37,6 +37,13 @@ def no_retry_sleep(monkeypatch):
     monkeypatch.setattr(openf1.time, "sleep", lambda _s: None)
 
 
+@pytest.fixture(autouse=True)
+def network_mocked(monkeypatch):
+    """conftest sets OPENF1_OFFLINE for the app tests; these tests exercise the
+    request path itself, with `responses` standing in for the network."""
+    monkeypatch.setattr(openf1, "OFFLINE", False)
+
+
 SESSIONS = [
     {"session_key": 200, "session_type": "Race", "date_start": "2026-03-08T04:00:00+00:00",
      "circuit_short_name": "Melbourne", "country_name": "Australia", "is_cancelled": False},
