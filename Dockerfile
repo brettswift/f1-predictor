@@ -55,6 +55,7 @@ COPY --from=builder /install /usr/local/
 
 COPY src/ ./src/
 COPY templates/ ./templates/
+COPY cron/ ./cron/
 COPY requirements.txt ./
 
 ENV PYTHONUNBUFFERED=1

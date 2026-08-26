@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-F1 Driver Refresh CronJob - Refreshes driver data from Ergast API weekly.
+F1 Driver Refresh CronJob - Refreshes driver data from OpenF1 weekly.
 Runs as a Kubernetes CronJob in the f1-predictor namespace.
 """
 
@@ -8,9 +8,12 @@ import argparse
 import os
 import sys
 import sqlite3
-import requests
 import logging
 from datetime import datetime
+
+# openf1.py lives in src/, a sibling of this cron/ directory.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+import openf1
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,7 +22,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DATABASE_PATH = os.environ.get('DATABASE_PATH', '/data/f1_predictions.db')
-F1_API_BASE = os.environ.get('F1_API_URL', 'https://api.jolpi.ca/ergast/f1').rstrip('/')
 F1_SEASON = int(os.environ.get('F1_SEASON', '2026'))
 
 
@@ -30,38 +32,36 @@ def get_db():
     return conn
 
 
-def fetch_drivers_from_api():
-    """Fetch drivers from Ergast F1 API."""
-    url = f"{F1_API_BASE}/{F1_SEASON}/drivers.json"
-
+def fetch_drivers_from_api(db=None):
+    """Fetch the current driver grid from OpenF1 (same shape as src/app.py)."""
     try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        data = response.json()
+        drivers_raw = openf1.get_drivers(season=F1_SEASON, db=db).data
+    except openf1.OpenF1Error as e:
+        logger.error(f"Failed to fetch drivers from OpenF1: {e}")
+        return None
 
-        drivers = []
-        driver_list = data.get('MRData', {}).get('DriverTable', {}).get('Drivers', [])
+    drivers = []
+    for idx, driver in enumerate(drivers_raw, start=1):
+        number = driver.get('driver_number')
+        if number is None:
+            continue
+        name = openf1.driver_display_name(driver)
+        drivers.append({
+            'id': idx,
+            # OpenF1 has no stable slug; derive one so existing driver_id
+            # semantics (unique text key) still hold.
+            'driver_id': (driver.get('name_acronym') or name).lower().replace(' ', '_'),
+            'name': name,
+            'number': int(number),
+            'code': driver.get('name_acronym'),
+            'nationality': driver.get('country_code'),
+            'team': driver.get('team_name'),
+        })
 
-        for idx, driver in enumerate(driver_list, start=1):
-            drivers.append({
-                'id': idx,
-                'driver_id': driver.get('driverId'),
-                'name': f"{driver.get('givenName', '')} {driver.get('familyName', '')}".strip(),
-                'number': int(driver.get('permanentNumber', 0)) if driver.get('permanentNumber') else 0,
-                'code': driver.get('code'),
-                'nationality': driver.get('nationality'),
-                'team': None
-            })
-
-        logger.info(f"Fetched {len(drivers)} drivers from API")
+    if drivers:
+        logger.info(f"Fetched {len(drivers)} drivers from OpenF1")
         return drivers
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"API request failed: {e}")
-        return None
-    except (KeyError, ValueError) as e:
-        logger.error(f"Unexpected API response format: {e}")
-        return None
+    return None
 
 
 def refresh_drivers(db):
@@ -71,7 +71,7 @@ def refresh_drivers(db):
     """
     logger.info("Starting driver refresh...")
 
-    drivers = fetch_drivers_from_api()
+    drivers = fetch_drivers_from_api(db)
     if not drivers:
         logger.error("Failed to fetch drivers from API")
         return False
@@ -122,7 +122,7 @@ def refresh_drivers(db):
 
 def main():
     """Main entry point."""
-    parser = argparse.ArgumentParser(description='Refresh F1 drivers from API')
+    parser = argparse.ArgumentParser(description='Refresh F1 drivers from OpenF1')
     parser.add_argument('--dry-run', action='store_true', help='Test API connectivity without updating DB')
     args = parser.parse_args()
 

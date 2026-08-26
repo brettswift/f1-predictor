@@ -9,7 +9,7 @@ class TestPredictionLocking:
 
     def _insert_race_and_drivers(self, db, round_num, status='open', hours_ahead=24):
         """Helper: insert a race and 3 drivers, return actual race id."""
-        race_time = datetime(2026, 4, 15, 14, 0, 0, tzinfo=timezone.utc)
+        race_time = datetime.now(timezone.utc)
         if status == 'locked':
             race_time = race_time - timedelta(hours=1)
         elif status == 'open':

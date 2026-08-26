@@ -242,9 +242,12 @@ class TestCronJobScriptExecution:
         import sys
         import os
         cron_path = os.path.join(os.path.dirname(__file__), '..', '..', 'cron')
+        src_path = os.path.join(os.path.dirname(__file__), '..', '..', 'src')
         sys.path.insert(0, cron_path)
-        
-        # Should not raise any import errors
+        sys.path.insert(0, src_path)
+
+        # Should not raise any import errors (race_manager imports openf1
+        # from src/, hence src_path above)
         import race_manager
         assert hasattr(race_manager, 'main'), "race_manager should have main()"
 

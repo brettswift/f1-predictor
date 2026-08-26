@@ -8,114 +8,94 @@ from unittest.mock import patch, MagicMock
 
 # Set test environment BEFORE imports
 os.environ['DATABASE_PATH'] = ':memory:'
-os.environ['F1_API_URL'] = 'https://api.jolpi.ca/ergast/f1'
 os.environ['F1_SEASON'] = '2026'
+os.environ['OPENF1_OFFLINE'] = 'true'
 
+# Add cron/ and src/ to path so we can import refresh_drivers (which itself
+# imports openf1 from src/)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'cron'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 
 class TestDriverRefreshAPI:
     """Test cases for driver API fetch (CJ-013)."""
 
     def test_cj_013_api_returns_driver_data(self):
-        """CJ-013: API returns driver data structure.
+        """CJ-013: OpenF1 returns driver data structure.
 
-        Given the Ergast API returns driver list
+        Given openf1.get_drivers returns a driver list
         When fetch_drivers_from_api is called
         Then correct driver data is returned
         """
         import refresh_drivers as dr
 
-        mock_response_data = {
-            'MRData': {
-                'DriverTable': {
-                    'Drivers': [
-                        {
-                            'driverId': 'verstappen',
-                            'givenName': 'Max',
-                            'familyName': 'Verstappen',
-                            'permanentNumber': '1',
-                            'code': 'VER',
-                            'nationality': 'Dutch'
-                        },
-                        {
-                            'driverId': 'hamilton',
-                            'givenName': 'Lewis',
-                            'familyName': 'Hamilton',
-                            'permanentNumber': '44',
-                            'code': 'HAM',
-                            'nationality': 'British'
-                        }
-                    ]
-                }
-            }
-        }
+        openf1_drivers = [
+            {
+                'driver_number': 1,
+                'full_name': 'Max VERSTAPPEN',
+                'name_acronym': 'VER',
+                'country_code': 'NED',
+                'team_name': 'Red Bull Racing',
+            },
+            {
+                'driver_number': 44,
+                'full_name': 'Lewis HAMILTON',
+                'name_acronym': 'HAM',
+                'country_code': 'GBR',
+                'team_name': 'Ferrari',
+            },
+        ]
 
-        with patch('refresh_drivers.requests.get') as mock_get:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = mock_response_data
-            mock_get.return_value = mock_resp
-
+        with patch('refresh_drivers.openf1.get_drivers') as mock_get_drivers:
+            mock_get_drivers.return_value = MagicMock(data=openf1_drivers)
             drivers = dr.fetch_drivers_from_api()
 
         assert drivers is not None
         assert len(drivers) == 2
-        assert drivers[0]['driver_id'] == 'verstappen'
+        assert drivers[0]['driver_id'] == 'ver'
         assert drivers[0]['name'] == 'Max Verstappen'
         assert drivers[0]['code'] == 'VER'
+        assert drivers[0]['number'] == 1
         assert drivers[1]['code'] == 'HAM'
 
     def test_cj_013_handles_api_error_gracefully(self):
         """CJ-013: API error is handled gracefully.
 
-        Given the API returns an error
+        Given openf1.get_drivers raises OpenF1Error
         When fetch_drivers_from_api is called
         Then None is returned (not an exception)
         """
         import refresh_drivers as dr
-        import requests
+        import openf1
 
-        with patch('refresh_drivers.requests.get') as mock_get:
-            mock_get.side_effect = requests.exceptions.RequestException("Network error")
+        with patch('refresh_drivers.openf1.get_drivers') as mock_get_drivers:
+            mock_get_drivers.side_effect = openf1.OpenF1Error("Network error")
 
             drivers = dr.fetch_drivers_from_api()
 
         assert drivers is None, "Should return None on API error"
 
-    def test_cj_013_handles_missing_driver_fields(self):
-        """CJ-013: Missing driver fields are handled gracefully.
+    def test_cj_013_handles_missing_driver_number(self):
+        """CJ-013: Drivers without a car number are skipped.
 
-        Given the API returns a driver with missing fields
+        Given openf1.get_drivers returns a driver with no driver_number
         When fetch_drivers_from_api is called
-        Then it should not crash
+        Then that driver is skipped rather than crashing
         """
         import refresh_drivers as dr
 
-        mock_response_data = {
-            'MRData': {
-                'DriverTable': {
-                    'Drivers': [
-                        {
-                            'driverId': 'test',
-                            'givenName': 'Test',
-                            'familyName': 'Driver'
-                            # missing permanentNumber, code, nationality
-                        }
-                    ]
-                }
-            }
-        }
+        openf1_drivers = [
+            {'driver_number': None, 'full_name': 'Test Driver'},
+            {'driver_number': 7, 'full_name': 'Real Driver', 'name_acronym': 'REA'},
+        ]
 
-        with patch('refresh_drivers.requests.get') as mock_get:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = mock_response_data
-            mock_get.return_value = mock_resp
-
+        with patch('refresh_drivers.openf1.get_drivers') as mock_get_drivers:
+            mock_get_drivers.return_value = MagicMock(data=openf1_drivers)
             drivers = dr.fetch_drivers_from_api()
 
         assert drivers is not None
         assert len(drivers) == 1
-        assert drivers[0]['name'] == 'Test Driver'
+        assert drivers[0]['name'] == 'Real Driver'
 
 
 class TestDriverRefreshDB:
@@ -403,19 +383,20 @@ class TestDriverRefreshCronJobManifest:
         assert 'DATABASE_PATH' in env, "Should have DATABASE_PATH env var"
         assert env['DATABASE_PATH'] == '/data/f1_predictions.db'
 
-    def test_cj_013_f1_api_url_env_set(self, cronjob_spec):
-        """CJ-013: F1_API_URL environment variable set.
+    def test_cj_013_no_jolpica_env_left(self, cronjob_spec):
+        """F1-01: no leftover Jolpica/Ergast config on the CronJob.
 
-        Given the CronJob container env vars
+        Given the CronJob container env vars (cron scripts now read
+        OpenF1's default via src/openf1.py, no F1_API_URL override needed)
         When checked
-        Then F1_API_URL should be set to Ergast endpoint
+        Then no env var should reference F1_API_URL or jolpi.ca
         """
         containers = cronjob_spec['spec']['jobTemplate']['spec']['template']['spec']['containers']
         container = containers[0]
 
-        env = {e['name']: e['value'] for e in container.get('env', [])}
-        assert 'F1_API_URL' in env, "Should have F1_API_URL env var"
-        assert 'jolpi.ca' in env['F1_API_URL'], "Should use Jolpi Ergast API"
+        env = {e['name']: e.get('value', '') for e in container.get('env', [])}
+        assert 'F1_API_URL' not in env, "F1_API_URL should be removed — cron scripts no longer read it"
+        assert not any('jolpi.ca' in v for v in env.values()), "No jolpi.ca reference should remain"
 
     def test_cj_013_concurrency_policy_forbid(self, cronjob_spec):
         """CJ-013: ConcurrencyPolicy is Forbid to prevent overlaps.

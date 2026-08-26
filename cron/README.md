@@ -1,11 +1,11 @@
 # F1 Race Results Auto-Fetcher
 
-Automatically fetches race results from Ergast API after each F1 race.
+Automatically fetches race results from OpenF1 after each F1 race.
 
 ## How It Works
 
 1. **Scheduler** (`scheduler.py`): Runs daily, spawns one-time CronJobs for upcoming races
-2. **Fetcher** (`fetch_race_results.py`): Fetches results from Ergast API and updates database
+2. **Fetcher** (`fetch_race_results.py`): Fetches results from OpenF1 (via `src/openf1.py`) and updates database
 3. **CronJobs**: Kubernetes CronJobs that run once per race (1.5 hours after start)
 
 ## Flow
@@ -17,7 +17,7 @@ Race Date/Time
     ↓
 K8s CronJob triggers
     ↓
-Fetch results from Ergast API
+Fetch results from OpenF1
     ↓
 If results available:
    - Update database
@@ -40,6 +40,6 @@ For dev: use namespace `f1-predictor-dev`.
 
 ## API Source
 
-Uses [Ergast F1 API](http://ergast.com/mrd/) - free, official F1 timing data.
-
-Example: `https://ergast.com/api/f1/2026/1/results.json`
+Uses [OpenF1](https://openf1.org/) via `src/openf1.py` - the single client all
+cron jobs and app reads go through. Free, no-auth tier; see `src/openf1.py`
+for retry/cache behaviour.

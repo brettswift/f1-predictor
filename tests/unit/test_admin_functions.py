@@ -23,7 +23,7 @@ class TestAdminAuth:
 
     def _insert_race_and_drivers(self, db, round_num, status='open', hours_ahead=24):
         """Helper: insert a race and 3 drivers, return race dict."""
-        race_time = datetime(2026, 4, 15, 14, 0, 0, tzinfo=timezone.utc)
+        race_time = datetime.now(timezone.utc)
         if status == 'open':
             race_time = race_time + timedelta(hours=hours_ahead - 1)
 
@@ -114,7 +114,7 @@ class TestAdminLockRace:
 
     def _insert_race_and_drivers(self, db, round_num, status='open', hours_ahead=24):
         """Helper: insert a race and 3 drivers, return race dict."""
-        race_time = datetime(2026, 4, 15, 14, 0, 0, tzinfo=timezone.utc)
+        race_time = datetime.now(timezone.utc)
         if status == 'open':
             race_time = race_time + timedelta(hours=hours_ahead - 1)
 
@@ -192,7 +192,7 @@ class TestAdminEnterResults:
 
     def _insert_race_and_drivers(self, db, round_num, status='locked'):
         """Helper: insert a race and 5 drivers, return race dict."""
-        race_time = datetime(2026, 4, 15, 14, 0, 0, tzinfo=timezone.utc) - timedelta(hours=1)
+        race_time = datetime.now(timezone.utc) - timedelta(hours=1)
 
         db.execute(
             'INSERT INTO races (name, round, date, status) VALUES (?, ?, ?, ?)',
@@ -331,7 +331,7 @@ class TestAdminDeletePredictions:
 
     def _insert_race_and_drivers(self, db, round_num, status='open', hours_ahead=24):
         """Helper: insert a race and 3 drivers."""
-        race_time = datetime(2026, 4, 15, 14, 0, 0, tzinfo=timezone.utc)
+        race_time = datetime.now(timezone.utc)
         if status == 'open':
             race_time = race_time + timedelta(hours=hours_ahead - 1)
 
@@ -407,15 +407,25 @@ class TestAdminDeletePredictions:
         )
         db.commit()
 
+        # The route keeps predictions whose P1 matches keep_p1_name and deletes the
+        # rest for matching users. Seed a driver nobody picked so "the rest" is
+        # well-defined. Previously this test passed keep_p1_name implicitly and
+        # relied on a real "Kimi" being seeded from the live API — so it only
+        # passed when the network happened to cooperate.
+        db.execute(
+            'INSERT INTO drivers (id, driver_id, name, number, code) VALUES (?, ?, ?, ?, ?)',
+            (9901, 'keeper_9901', 'Keeper Driver', 99, 'KEE')
+        )
+        db.commit()
+
         self._login(client, 'brett')
 
         # Submit deletion for 'baduser' predictions
         response = client.post('/admin/delete-predictions',
                                data={'username_pattern': 'baduser',
-                                     'race_id': race['id'],
-                                     'exclude_driver_id': race['drivers'][0]['id']},
+                                     'keep_p1_name': 'Keeper Driver'},
                                follow_redirects=True)
-        
+
         assert response.status_code == 200
 
         # Verify baduser's prediction was deleted
@@ -467,7 +477,7 @@ class TestAdminRouteProtection:
         db = get_db()
 
         # Insert race
-        race_time = datetime(2026, 4, 15, 14, 0, 0, tzinfo=timezone.utc) + timedelta(hours=12)
+        race_time = datetime.now(timezone.utc) + timedelta(hours=12)
         db.execute(
             'INSERT INTO races (name, round, date, status) VALUES (?, ?, ?, ?)',
             ('Test GP', 601, race_time.strftime('%Y-%m-%d %H:%M:%S'), 'open')
