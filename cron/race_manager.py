@@ -14,15 +14,20 @@ Stages per race (tracked in the race_stages table):
 
 Between race weekends nothing is active, so the script does two quick
 DB queries and exits.
+
+Results come from OpenF1 (src/openf1.py) — the same client the web app uses.
 """
 
 import argparse
 import os
 import sys
 import sqlite3
-import requests
 import logging
 from datetime import datetime, timezone, timedelta
+
+# openf1.py lives in src/, a sibling of this cron/ directory.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+import openf1
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,7 +36,6 @@ logging.basicConfig(
 logger = logging.getLogger('race_manager')
 
 DATABASE_PATH = os.environ.get('DATABASE_PATH', '/data/f1_predictions.db')
-F1_API_BASE = os.environ.get('F1_API_URL', 'https://api.jolpi.ca/ergast/f1').rstrip('/')
 F1_SEASON = int(os.environ.get('F1_SEASON', '2026'))
 
 WATCH_WINDOW = timedelta(hours=12)
@@ -160,44 +164,51 @@ def promote_to_polling(db, now):
 
 # ── polling → completed ────────────────────────────────────────────
 
-def _driver_display_name(result_row):
-    d = result_row.get('Driver') or {}
-    given = (d.get('givenName') or '').strip()
-    family = (d.get('familyName') or '').strip()
-    return f"{given} {family}".strip() or 'Unknown'
-
-
-def _fetch_podium(season, round_num):
-    url = f"{F1_API_BASE}/{season}/{round_num}/results.json"
+def _resolve_session_key(db, race_id, round_num, season, session_key=None):
+    """
+    session_key for a race, resolving lazily for rows seeded before the
+    column existed. Mirrors src/app.py's _race_session_key.
+    """
+    if session_key:
+        return session_key
     try:
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        races = resp.json().get('MRData', {}).get('RaceTable', {}).get('Races', [])
-        if not races:
-            return None
-        results = races[0].get('Results', [])
-        if len(results) < 3:
-            return None
-        podium = {}
-        for i, key in enumerate(('p1', 'p2', 'p3')):
-            podium[key] = {
-                'driver_name': _driver_display_name(results[i]),
-                'driver_code': (results[i].get('Driver') or {}).get('code', ''),
-                'constructor': (results[i].get('Constructor') or {}).get('name', ''),
-            }
-        return podium
-    except Exception as e:
-        logger.error("API error round %s: %s", round_num, e)
+        for session_data in openf1.get_race_sessions(season=season, db=db).data:
+            if session_data.get('round') == round_num:
+                db.execute('UPDATE races SET session_key = ? WHERE id = ?',
+                           (session_data['session_key'], race_id))
+                db.commit()
+                return session_data['session_key']
+    except openf1.OpenF1Error as e:
+        logger.warning("Could not resolve session_key for race %s: %s", race_id, e)
+    return None
+
+
+def _get_driver_id_by_number(db, driver_number):
+    """DB driver id from a car number (how OpenF1 identifies drivers)."""
+    if driver_number is None:
+        return None
+    row = db.execute('SELECT id FROM drivers WHERE number = ?', (driver_number,)).fetchone()
+    return row['id'] if row else None
+
+
+def _fetch_podium(db, session_key):
+    try:
+        podium = openf1.get_podium(session_key, db=db)
+    except openf1.OpenF1Error as e:
+        logger.error("OpenF1 request failed for session %s: %s", session_key, e)
+        return None
+    if not podium:
         return None
 
-
-def _get_driver_id(db, name):
-    row = db.execute('SELECT id FROM drivers WHERE name = ?', (name,)).fetchone()
-    if row:
-        return row['id']
-    last = name.split()[-1]
-    row = db.execute('SELECT id FROM drivers WHERE name LIKE ?', (f'%{last}%',)).fetchone()
-    return row['id'] if row else None
+    resolved = {}
+    for slot in ('p1', 'p2', 'p3'):
+        driver_db_id = _get_driver_id_by_number(db, podium[slot]['driver_number'])
+        if driver_db_id is None:
+            logger.error("driver #%s (%s) not in drivers table — skipping ingest",
+                         podium[slot]['driver_number'], podium[slot]['driver_name'])
+            return None
+        resolved[slot] = {'driver_id': driver_db_id, 'driver_name': podium[slot]['driver_name']}
+    return resolved
 
 
 def _calculate_score(pred, res):
@@ -222,12 +233,9 @@ def _calculate_score(pred, res):
 
 
 def _save_results_and_score(db, race_id, podium):
-    p1 = _get_driver_id(db, podium['p1']['driver_name'])
-    p2 = _get_driver_id(db, podium['p2']['driver_name'])
-    p3 = _get_driver_id(db, podium['p3']['driver_name'])
-    if not all((p1, p2, p3)):
-        logger.error("Could not resolve all podium drivers for race %d", race_id)
-        return False
+    p1 = podium['p1']['driver_id']
+    p2 = podium['p2']['driver_id']
+    p3 = podium['p3']['driver_id']
 
     db.execute('''
         INSERT INTO results (race_id, p1_driver_id, p2_driver_id, p3_driver_id)
@@ -256,7 +264,7 @@ def _save_results_and_score(db, race_id, podium):
 def poll_for_results(db, now):
     rows = db.execute('''
         SELECT rs.race_id, rs.entered_at, rs.last_poll_at, rs.poll_count,
-               r.name, r.round
+               r.name, r.round, r.session_key
         FROM race_stages rs
         JOIN races r ON r.id = rs.race_id
         WHERE rs.stage = 'polling'
@@ -278,7 +286,8 @@ def poll_for_results(db, now):
             continue
 
         logger.info("poll #%d   %s (round %d)", r['poll_count'] + 1, r['name'], r['round'])
-        podium = _fetch_podium(F1_SEASON, r['round'])
+        session_key = _resolve_session_key(db, r['race_id'], r['round'], F1_SEASON, r['session_key'])
+        podium = _fetch_podium(db, session_key) if session_key else None
 
         if podium:
             ok = _save_results_and_score(db, r['race_id'], podium)
@@ -318,25 +327,43 @@ def show_status(db):
 
 # ── main ────────────────────────────────────────────────────────────
 
+def _test_api():
+    """Smoke-test OpenF1 connectivity (most recent Race session of F1_SEASON)."""
+    try:
+        sessions = openf1.get_race_sessions(season=F1_SEASON).data
+    except openf1.OpenF1Error as e:
+        logger.error("Test fetch failed: %s", e)
+        return 1
+    if not sessions:
+        logger.error("Test fetch failed: no sessions available")
+        return 1
+    session_key = sessions[-1]['session_key']
+    try:
+        podium = openf1.get_podium(session_key)
+    except openf1.OpenF1Error as e:
+        logger.error("Test fetch failed: %s", e)
+        return 1
+    if podium:
+        logger.info(
+            "OK P1=%s P2=%s P3=%s",
+            podium['p1']['driver_name'],
+            podium['p2']['driver_name'],
+            podium['p3']['driver_name'],
+        )
+        return 0
+    logger.error("Test fetch failed")
+    return 1
+
+
 def main():
     parser = argparse.ArgumentParser(description='F1 race weekend state machine')
     parser.add_argument('--status', action='store_true', help='Show current race stages')
     parser.add_argument('--test-api', action='store_true',
-                        help='Smoke-test the results API (2025 R24)')
+                        help='Smoke-test OpenF1 connectivity')
     args = parser.parse_args()
 
     if args.test_api:
-        podium = _fetch_podium(2025, 24)
-        if podium:
-            logger.info(
-                "OK P1=%s P2=%s P3=%s",
-                podium['p1']['driver_name'],
-                podium['p2']['driver_name'],
-                podium['p3']['driver_name'],
-            )
-            sys.exit(0)
-        logger.error("Test fetch failed")
-        sys.exit(1)
+        sys.exit(_test_api())
 
     if not os.path.exists(DATABASE_PATH):
         logger.error("DB not found at %s", DATABASE_PATH)

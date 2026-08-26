@@ -6,11 +6,13 @@ import sys
 
 # Set test database BEFORE importing race_manager
 os.environ['DATABASE_PATH'] = ':memory:'
-os.environ['F1_API_URL'] = 'https://api.jolpi.ca/ergast/f1'
 os.environ['F1_SEASON'] = '2026'
+os.environ['OPENF1_OFFLINE'] = 'true'
 
-# Add cron/ to path so we can import race_manager
+# Add cron/ and src/ to path so we can import race_manager (which itself
+# imports openf1 from src/)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'cron'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 # Import after setting env vars
 import race_manager as rm

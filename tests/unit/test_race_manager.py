@@ -8,11 +8,13 @@ from unittest.mock import patch
 
 # Set test database BEFORE importing race_manager
 os.environ['DATABASE_PATH'] = ':memory:'
-os.environ['F1_API_URL'] = 'https://api.jolpi.ca/ergast/f1'
 os.environ['F1_SEASON'] = '2026'
+os.environ['OPENF1_OFFLINE'] = 'true'
 
-# Add cron/ to path so we can import race_manager
+# Add cron/ and src/ to path so we can import race_manager (which itself
+# imports openf1 from src/)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'cron'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 # Import after setting env vars
 import race_manager as rm
@@ -35,7 +37,8 @@ class MockDB:
                 name TEXT NOT NULL,
                 round INTEGER NOT NULL,
                 date TEXT NOT NULL,
-                status TEXT DEFAULT 'open'
+                status TEXT DEFAULT 'open',
+                session_key INTEGER
             )
         ''')
         c.execute('''
@@ -258,9 +261,9 @@ class TestRaceManagerStateMachine:
         now = polling_started + timedelta(minutes=5)
         
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (5, 'Test Grand Prix 5', 14, '2026-06-15 14:00:00', 'locked'))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (5, 'Test Grand Prix 5', 14, '2026-06-15 14:00:00', 'locked', 9005))
         
         db.execute('''
             INSERT INTO race_stages (race_id, stage, entered_at, last_poll_at, poll_count)
@@ -280,14 +283,16 @@ class TestRaceManagerStateMachine:
         ''', ('user-abc-123', 5, 1, 2, 3))
         db.commit()
         
-        # Mock API response
-        def mock_fetch_podium(season, round_num):
+        # Mock the OpenF1-backed podium fetch (driver ids already resolved,
+        # same shape _fetch_podium returns after matching by car number).
+        def mock_fetch_podium(db, session_key):
+            assert session_key == 9005
             return {
-                'p1': {'driver_name': 'Max Verstappen', 'driver_code': 'VER', 'constructor': 'Red Bull'},
-                'p2': {'driver_name': 'Lando Norris', 'driver_code': 'NOR', 'constructor': 'McLaren'},
-                'p3': {'driver_name': 'Charles Leclerc', 'driver_code': 'LEC', 'constructor': 'Ferrari'},
+                'p1': {'driver_id': 1, 'driver_name': 'Max Verstappen'},
+                'p2': {'driver_id': 2, 'driver_name': 'Lando Norris'},
+                'p3': {'driver_id': 3, 'driver_name': 'Charles Leclerc'},
             }
-        
+
         monkeypatch.setattr('race_manager._fetch_podium', mock_fetch_podium)
         
         rm.poll_for_results(db, now)
@@ -324,9 +329,9 @@ class TestRaceManagerStateMachine:
         now = polling_started + timedelta(minutes=5)
         
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (6, 'Test Grand Prix 6', 15, '2026-06-15 14:00:00', 'locked'))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (6, 'Test Grand Prix 6', 15, '2026-06-15 14:00:00', 'locked', 9006))
         
         db.execute('''
             INSERT INTO race_stages (race_id, stage, entered_at, last_poll_at, poll_count)
@@ -335,9 +340,9 @@ class TestRaceManagerStateMachine:
         db.commit()
         
         # Mock API returning no results
-        def mock_fetch_podium(season, round_num):
+        def mock_fetch_podium(db, session_key):
             return None
-        
+
         monkeypatch.setattr('race_manager._fetch_podium', mock_fetch_podium)
         
         rm.poll_for_results(db, now)

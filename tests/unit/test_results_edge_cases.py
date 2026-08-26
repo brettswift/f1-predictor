@@ -12,13 +12,16 @@ AC:
 import pytest
 import os
 import sys
-import responses
 import sqlite3
 from datetime import datetime, timezone, timedelta
+from unittest.mock import patch
 
-# Add cron/ to path so we can import race_manager
+# Add cron/ and src/ to path so we can import race_manager (which itself
+# imports openf1 from src/)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'cron'))
+
+import openf1  # noqa: E402
 
 
 def create_test_db(db_path):
@@ -57,6 +60,7 @@ def create_test_db(db_path):
             round INTEGER NOT NULL,
             date TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'open',
+            session_key INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -143,31 +147,42 @@ def test_db(tmp_path):
 @pytest.fixture
 def rm_with_db(test_db):
     """Get race_manager module functions that work with our test database.
-    
+
     We monkeypatch get_db to return our test database connection.
     """
     import race_manager as rm
-    import importlib
-    
+
     # Monkeypatch get_db to return our test connection
     original_get_db = rm.get_db
     rm.get_db = lambda: test_db
-    
+
     yield rm
-    
+
     # Restore original
     rm.get_db = original_get_db
+
+
+@pytest.fixture
+def mock_get_podium():
+    """Patch the OpenF1-backed podium fetch race_manager._fetch_podium calls.
+
+    Tests set .return_value (a podium dict or None) or .side_effect (e.g.
+    openf1.OpenF1Error) to control what the "upstream" returns. Races in
+    these tests always carry an explicit session_key (see create_test_db),
+    so _resolve_session_key never needs to hit the network.
+    """
+    with patch('race_manager.openf1.get_podium') as mock:
+        yield mock
 
 
 class TestResultsIngestedForLockedRaces:
     """Test cases for RI-008: Results ingested for locked races."""
 
-    @responses.activate
-    def test_ri_008_podium_data_ingested_correctly(self, test_db, rm_with_db):
+    def test_ri_008_podium_data_ingested_correctly(self, test_db, rm_with_db, mock_get_podium):
         """RI-008: Results ingested for locked races - API returns correct podium data.
         
         Given a race with status 'locked' is being polled
-        When the Ergast API returns valid podium results
+        When OpenF1 returns valid podium results
         Then those results are correctly ingested into the database
         """
         rm = rm_with_db
@@ -176,9 +191,9 @@ class TestResultsIngestedForLockedRaces:
         # Setup: locked race with race_stages entry in polling stage
         race_time = datetime(2026, 3, 28, 13, 0, 0, tzinfo=timezone.utc)
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, 'locked')
-        ''', (201, 'Test Grand Prix', 5, race_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, 'locked', ?)
+        ''', (201, 'Test Grand Prix', 5, race_time.strftime('%Y-%m-%d %H:%M:%S'), 9201))
         
         # Add drivers for the podium
         db.execute('''
@@ -203,27 +218,11 @@ class TestResultsIngestedForLockedRaces:
         db.commit()
         
         # Mock the API response
-        responses.add(
-            responses.GET,
-            'https://api.jolpi.ca/ergast/f1/2026/5/results.json',
-            json={
-                "MRData": {
-                    "RaceTable": {
-                        "Races": [{
-                            "season": "2026",
-                            "round": "5",
-                            "raceName": "Test Grand Prix",
-                            "Results": [
-                                {"position": "1", "Driver": {"code": "VER", "givenName": "Max", "familyName": "Verstappen"}, "Constructor": {"name": "Red Bull"}},
-                                {"position": "2", "Driver": {"code": "NOR", "givenName": "Lando", "familyName": "Norris"}, "Constructor": {"name": "McLaren"}},
-                                {"position": "3", "Driver": {"code": "LEC", "givenName": "Charles", "familyName": "Leclerc"}, "Constructor": {"name": "Ferrari"}},
-                            ]
-                        }]
-                    }
-                }
-            },
-            status=200
-        )
+        mock_get_podium.return_value = {
+            'p1': {'position': 1, 'driver_number': 1, 'driver_name': 'Max Verstappen'},
+            'p2': {'position': 2, 'driver_number': 4, 'driver_name': 'Lando Norris'},
+            'p3': {'position': 3, 'driver_number': 16, 'driver_name': 'Charles Leclerc'},
+        }
         
         # Execute polling
         now = race_time + timedelta(hours=2)
@@ -240,8 +239,7 @@ class TestResultsIngestedForLockedRaces:
         race = db.execute('SELECT * FROM races WHERE id = ?', (201,)).fetchone()
         assert race['status'] == 'completed', "Race should be marked as completed"
 
-    @responses.activate
-    def test_ri_008_ignores_non_podium_results(self, test_db, rm_with_db):
+    def test_ri_008_ignores_non_podium_results(self, test_db, rm_with_db, mock_get_podium):
         """RI-008: Only top 3 drivers are ingested as podium results.
         
         Given the API returns more than 3 drivers
@@ -253,9 +251,9 @@ class TestResultsIngestedForLockedRaces:
         
         race_time = datetime(2026, 3, 28, 13, 0, 0, tzinfo=timezone.utc)
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, 'locked')
-        ''', (202, 'Full Results Race', 6, race_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, 'locked', ?)
+        ''', (202, 'Full Results Race', 6, race_time.strftime('%Y-%m-%d %H:%M:%S'), 9202))
         
         # Add drivers for the podium
         db.execute('''
@@ -279,29 +277,11 @@ class TestResultsIngestedForLockedRaces:
         db.commit()
         
         # Mock API with 10 drivers (full grid)
-        responses.add(
-            responses.GET,
-            'https://api.jolpi.ca/ergast/f1/2026/6/results.json',
-            json={
-                "MRData": {
-                    "RaceTable": {
-                        "Races": [{
-                            "season": "2026",
-                            "round": "6",
-                            "raceName": "Full Results Race",
-                            "Results": [
-                                {"position": "1", "Driver": {"code": "VER", "givenName": "Max", "familyName": "Verstappen"}, "Constructor": {"name": "Red Bull"}},
-                                {"position": "2", "Driver": {"code": "NOR", "givenName": "Lando", "familyName": "Norris"}, "Constructor": {"name": "McLaren"}},
-                                {"position": "3", "Driver": {"code": "LEC", "givenName": "Charles", "familyName": "Leclerc"}, "Constructor": {"name": "Ferrari"}},
-                                {"position": "4", "Driver": {"code": "PIA", "givenName": "Oscar", "familyName": "Piastri"}, "Constructor": {"name": "McLaren"}},
-                                {"position": "5", "Driver": {"code": "RUS", "givenName": "George", "familyName": "Russell"}, "Constructor": {"name": "Mercedes"}},
-                            ]
-                        }]
-                    }
-                }
-            },
-            status=200
-        )
+        mock_get_podium.return_value = {
+            'p1': {'position': 1, 'driver_number': 1, 'driver_name': 'Max Verstappen'},
+            'p2': {'position': 2, 'driver_number': 4, 'driver_name': 'Lando Norris'},
+            'p3': {'position': 3, 'driver_number': 16, 'driver_name': 'Charles Leclerc'},
+        }
         
         now = race_time + timedelta(hours=2)
         rm.poll_for_results(db, now)
@@ -316,8 +296,7 @@ class TestResultsIngestedForLockedRaces:
 class TestScoresCalculated:
     """Test cases for RI-009: Scores calculated correctly."""
 
-    @responses.activate
-    def test_ri_009_perfect_prediction_scores_20(self, test_db, rm_with_db):
+    def test_ri_009_perfect_prediction_scores_20(self, test_db, rm_with_db, mock_get_podium):
         """RI-009: Perfect prediction scores 20 points.
         
         Given a user has made a perfect prediction for a race
@@ -329,9 +308,9 @@ class TestScoresCalculated:
         
         race_time = datetime(2026, 3, 28, 13, 0, 0, tzinfo=timezone.utc)
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, 'locked')
-        ''', (301, 'Score Test Race', 7, race_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, 'locked', ?)
+        ''', (301, 'Score Test Race', 7, race_time.strftime('%Y-%m-%d %H:%M:%S'), 9301))
         
         # Add drivers
         db.execute('''
@@ -364,27 +343,11 @@ class TestScoresCalculated:
         
         db.commit()
         
-        responses.add(
-            responses.GET,
-            'https://api.jolpi.ca/ergast/f1/2026/7/results.json',
-            json={
-                "MRData": {
-                    "RaceTable": {
-                        "Races": [{
-                            "season": "2026",
-                            "round": "7",
-                            "raceName": "Score Test Race",
-                            "Results": [
-                                {"position": "1", "Driver": {"code": "VER", "givenName": "Max", "familyName": "Verstappen"}, "Constructor": {"name": "Red Bull"}},
-                                {"position": "2", "Driver": {"code": "NOR", "givenName": "Lando", "familyName": "Norris"}, "Constructor": {"name": "McLaren"}},
-                                {"position": "3", "Driver": {"code": "LEC", "givenName": "Charles", "familyName": "Leclerc"}, "Constructor": {"name": "Ferrari"}},
-                            ]
-                        }]
-                    }
-                }
-            },
-            status=200
-        )
+        mock_get_podium.return_value = {
+            'p1': {'position': 1, 'driver_number': 1, 'driver_name': 'Max Verstappen'},
+            'p2': {'position': 2, 'driver_number': 4, 'driver_name': 'Lando Norris'},
+            'p3': {'position': 3, 'driver_number': 16, 'driver_name': 'Charles Leclerc'},
+        }
         
         now = race_time + timedelta(hours=2)
         rm.poll_for_results(db, now)
@@ -393,8 +356,7 @@ class TestScoresCalculated:
         assert score is not None, "Score should be calculated"
         assert score['points'] == 20, f"Perfect prediction should score 20, got {score['points']}"
 
-    @responses.activate
-    def test_ri_009_partial_prediction_scores_correctly(self, test_db, rm_with_db):
+    def test_ri_009_partial_prediction_scores_correctly(self, test_db, rm_with_db, mock_get_podium):
         """RI-009: Partial prediction scores correctly based on correctness.
         
         Given a user predicted P1 and P3 correctly but P2 wrong
@@ -406,9 +368,9 @@ class TestScoresCalculated:
         
         race_time = datetime(2026, 3, 28, 13, 0, 0, tzinfo=timezone.utc)
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, 'locked')
-        ''', (302, 'Partial Score Race', 8, race_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, 'locked', ?)
+        ''', (302, 'Partial Score Race', 8, race_time.strftime('%Y-%m-%d %H:%M:%S'), 9302))
         
         # Drivers: VER=1, NOR=2, LEC=3 in race results
         db.execute('''
@@ -442,27 +404,11 @@ class TestScoresCalculated:
         db.commit()
         
         # Race results: P1=VER, P2=NOR, P3=LEC
-        responses.add(
-            responses.GET,
-            'https://api.jolpi.ca/ergast/f1/2026/8/results.json',
-            json={
-                "MRData": {
-                    "RaceTable": {
-                        "Races": [{
-                            "season": "2026",
-                            "round": "8",
-                            "raceName": "Partial Score Race",
-                            "Results": [
-                                {"position": "1", "Driver": {"code": "VER", "givenName": "Max", "familyName": "Verstappen"}, "Constructor": {"name": "Red Bull"}},
-                                {"position": "2", "Driver": {"code": "NOR", "givenName": "Lando", "familyName": "Norris"}, "Constructor": {"name": "McLaren"}},
-                                {"position": "3", "Driver": {"code": "LEC", "givenName": "Charles", "familyName": "Leclerc"}, "Constructor": {"name": "Ferrari"}},
-                            ]
-                        }]
-                    }
-                }
-            },
-            status=200
-        )
+        mock_get_podium.return_value = {
+            'p1': {'position': 1, 'driver_number': 1, 'driver_name': 'Max Verstappen'},
+            'p2': {'position': 2, 'driver_number': 4, 'driver_name': 'Lando Norris'},
+            'p3': {'position': 3, 'driver_number': 16, 'driver_name': 'Charles Leclerc'},
+        }
         
         now = race_time + timedelta(hours=2)
         rm.poll_for_results(db, now)
@@ -475,8 +421,7 @@ class TestScoresCalculated:
         # Total: 10 + 1 + 1 = 12
         assert score['points'] == 12, f"P1 correct + two on podium wrong position should score 12, got {score['points']}"
 
-    @responses.activate
-    def test_ri_009_all_wrong_prediction_scores_0(self, test_db, rm_with_db):
+    def test_ri_009_all_wrong_prediction_scores_0(self, test_db, rm_with_db, mock_get_podium):
         """RI-009: All wrong prediction scores 0 points.
         
         Given a user predicted all drivers wrong
@@ -488,9 +433,9 @@ class TestScoresCalculated:
         
         race_time = datetime(2026, 3, 28, 13, 0, 0, tzinfo=timezone.utc)
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, 'locked')
-        ''', (303, 'Zero Score Race', 9, race_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, 'locked', ?)
+        ''', (303, 'Zero Score Race', 9, race_time.strftime('%Y-%m-%d %H:%M:%S'), 9303))
         
         db.execute('''
             INSERT INTO drivers (id, driver_id, name, number, code)
@@ -535,27 +480,11 @@ class TestScoresCalculated:
         
         db.commit()
         
-        responses.add(
-            responses.GET,
-            'https://api.jolpi.ca/ergast/f1/2026/9/results.json',
-            json={
-                "MRData": {
-                    "RaceTable": {
-                        "Races": [{
-                            "season": "2026",
-                            "round": "9",
-                            "raceName": "Zero Score Race",
-                            "Results": [
-                                {"position": "1", "Driver": {"code": "VER", "givenName": "Max", "familyName": "Verstappen"}, "Constructor": {"name": "Red Bull"}},
-                                {"position": "2", "Driver": {"code": "NOR", "givenName": "Lando", "familyName": "Norris"}, "Constructor": {"name": "McLaren"}},
-                                {"position": "3", "Driver": {"code": "LEC", "givenName": "Charles", "familyName": "Leclerc"}, "Constructor": {"name": "Ferrari"}},
-                            ]
-                        }]
-                    }
-                }
-            },
-            status=200
-        )
+        mock_get_podium.return_value = {
+            'p1': {'position': 1, 'driver_number': 1, 'driver_name': 'Max Verstappen'},
+            'p2': {'position': 2, 'driver_number': 4, 'driver_name': 'Lando Norris'},
+            'p3': {'position': 3, 'driver_number': 16, 'driver_name': 'Charles Leclerc'},
+        }
         
         now = race_time + timedelta(hours=2)
         rm.poll_for_results(db, now)
@@ -564,8 +493,7 @@ class TestScoresCalculated:
         assert score is not None, "Score should be calculated"
         assert score['points'] == 0, f"All wrong should score 0, got {score['points']}"
 
-    @responses.activate
-    def test_ri_009_multiple_users_scores_calculated(self, test_db, rm_with_db):
+    def test_ri_009_multiple_users_scores_calculated(self, test_db, rm_with_db, mock_get_podium):
         """RI-009: Multiple users all get their scores calculated.
         
         Given multiple users with different predictions for the same race
@@ -577,9 +505,9 @@ class TestScoresCalculated:
         
         race_time = datetime(2026, 3, 28, 13, 0, 0, tzinfo=timezone.utc)
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, 'locked')
-        ''', (304, 'Multi User Race', 10, race_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, 'locked', ?)
+        ''', (304, 'Multi User Race', 10, race_time.strftime('%Y-%m-%d %H:%M:%S'), 9304))
         
         db.execute('''
             INSERT INTO drivers (id, driver_id, name, number, code)
@@ -644,27 +572,11 @@ class TestScoresCalculated:
         
         db.commit()
         
-        responses.add(
-            responses.GET,
-            'https://api.jolpi.ca/ergast/f1/2026/10/results.json',
-            json={
-                "MRData": {
-                    "RaceTable": {
-                        "Races": [{
-                            "season": "2026",
-                            "round": "10",
-                            "raceName": "Multi User Race",
-                            "Results": [
-                                {"position": "1", "Driver": {"code": "VER", "givenName": "Max", "familyName": "Verstappen"}, "Constructor": {"name": "Red Bull"}},
-                                {"position": "2", "Driver": {"code": "NOR", "givenName": "Lando", "familyName": "Norris"}, "Constructor": {"name": "McLaren"}},
-                                {"position": "3", "Driver": {"code": "LEC", "givenName": "Charles", "familyName": "Leclerc"}, "Constructor": {"name": "Ferrari"}},
-                            ]
-                        }]
-                    }
-                }
-            },
-            status=200
-        )
+        mock_get_podium.return_value = {
+            'p1': {'position': 1, 'driver_number': 1, 'driver_name': 'Max Verstappen'},
+            'p2': {'position': 2, 'driver_number': 4, 'driver_name': 'Lando Norris'},
+            'p3': {'position': 3, 'driver_number': 16, 'driver_name': 'Charles Leclerc'},
+        }
         
         now = race_time + timedelta(hours=2)
         rm.poll_for_results(db, now)
@@ -686,8 +598,7 @@ class TestScoresCalculated:
 class TestNoDataRetry:
     """Test cases for RI-010: No data = retry next run."""
 
-    @responses.activate
-    def test_ri_010_no_results_returns_none_and_retries(self, test_db, rm_with_db):
+    def test_ri_010_no_results_returns_none_and_retries(self, test_db, rm_with_db, mock_get_podium):
         """RI-010: No data from API = retry next run.
         
         Given a race is in polling stage
@@ -700,9 +611,9 @@ class TestNoDataRetry:
         
         race_time = datetime(2026, 3, 28, 13, 0, 0, tzinfo=timezone.utc)
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, 'locked')
-        ''', (401, 'Retry Test Race', 11, race_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, 'locked', ?)
+        ''', (401, 'Retry Test Race', 11, race_time.strftime('%Y-%m-%d %H:%M:%S'), 9401))
         
         db.execute('''
             INSERT INTO race_stages (race_id, stage, entered_at, last_poll_at, poll_count)
@@ -712,18 +623,7 @@ class TestNoDataRetry:
         db.commit()
         
         # Mock API returning empty results
-        responses.add(
-            responses.GET,
-            'https://api.jolpi.ca/ergast/f1/2026/11/results.json',
-            json={
-                "MRData": {
-                    "RaceTable": {
-                        "Races": []  # No results yet
-                    }
-                }
-            },
-            status=200
-        )
+        mock_get_podium.return_value = None
         
         now = race_time + timedelta(hours=2)
         rm.poll_for_results(db, now)
@@ -737,8 +637,7 @@ class TestNoDataRetry:
         result = db.execute('SELECT * FROM results WHERE race_id = ?', (401,)).fetchone()
         assert result is None, "No results should be stored when API returns empty"
 
-    @responses.activate
-    def test_ri_010_incomplete_results_triggers_retry(self, test_db, rm_with_db):
+    def test_ri_010_incomplete_results_triggers_retry(self, test_db, rm_with_db, mock_get_podium):
         """RI-010: Incomplete podium data triggers retry.
         
         Given a race is in polling stage
@@ -750,9 +649,9 @@ class TestNoDataRetry:
         
         race_time = datetime(2026, 3, 28, 13, 0, 0, tzinfo=timezone.utc)
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, 'locked')
-        ''', (402, 'Incomplete Test Race', 12, race_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, 'locked', ?)
+        ''', (402, 'Incomplete Test Race', 12, race_time.strftime('%Y-%m-%d %H:%M:%S'), 9402))
         
         db.execute('''
             INSERT INTO race_stages (race_id, stage, entered_at, last_poll_at, poll_count)
@@ -762,26 +661,7 @@ class TestNoDataRetry:
         db.commit()
         
         # Mock API returning only 2 results (race not finished)
-        responses.add(
-            responses.GET,
-            'https://api.jolpi.ca/ergast/f1/2026/12/results.json',
-            json={
-                "MRData": {
-                    "RaceTable": {
-                        "Races": [{
-                            "season": "2026",
-                            "round": "12",
-                            "raceName": "Incomplete Test Race",
-                            "Results": [
-                                {"position": "1", "Driver": {"code": "VER", "givenName": "Max", "familyName": "Verstappen"}, "Constructor": {"name": "Red Bull"}},
-                                {"position": "2", "Driver": {"code": "NOR", "givenName": "Lando", "familyName": "Norris"}, "Constructor": {"name": "McLaren"}},
-                            ]
-                        }]
-                    }
-                }
-            },
-            status=200
-        )
+        mock_get_podium.return_value = None  # incomplete podium (2 classified)
         
         now = race_time + timedelta(hours=2)
         rm.poll_for_results(db, now)
@@ -791,8 +671,7 @@ class TestNoDataRetry:
         assert stage['stage'] == 'polling', "Should still be polling when results incomplete"
         assert stage['poll_count'] == 1, "Poll count should increment"
 
-    @responses.activate
-    def test_ri_010_api_error_triggers_retry(self, test_db, rm_with_db):
+    def test_ri_010_api_error_triggers_retry(self, test_db, rm_with_db, mock_get_podium):
         """RI-010: API error = retry next run.
         
         Given a race is in polling stage
@@ -804,9 +683,9 @@ class TestNoDataRetry:
         
         race_time = datetime(2026, 3, 28, 13, 0, 0, tzinfo=timezone.utc)
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, 'locked')
-        ''', (403, 'Error Test Race', 13, race_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, 'locked', ?)
+        ''', (403, 'Error Test Race', 13, race_time.strftime('%Y-%m-%d %H:%M:%S'), 9403))
         
         db.execute('''
             INSERT INTO race_stages (race_id, stage, entered_at, last_poll_at, poll_count)
@@ -816,12 +695,7 @@ class TestNoDataRetry:
         db.commit()
         
         # Mock API returning error status
-        responses.add(
-            responses.GET,
-            'https://api.jolpi.ca/ergast/f1/2026/13/results.json',
-            json={"error": "Service unavailable"},
-            status=503
-        )
+        mock_get_podium.side_effect = openf1.OpenF1Error('upstream error 503')
         
         now = race_time + timedelta(hours=2)
         rm.poll_for_results(db, now)
@@ -848,9 +722,9 @@ class TestOnlyProcessesLockedRaces:
         
         # Open race (not locked)
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, 'open')
-        ''', (501, 'Open Race', 14, race_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, 'open', ?)
+        ''', (501, 'Open Race', 14, race_time.strftime('%Y-%m-%d %H:%M:%S'), 9501))
         
         # Race in watching stage (not polling)
         db.execute('''
@@ -881,9 +755,9 @@ class TestOnlyProcessesLockedRaces:
         
         # Completed race
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, 'completed')
-        ''', (502, 'Completed Race', 15, race_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, 'completed', ?)
+        ''', (502, 'Completed Race', 15, race_time.strftime('%Y-%m-%d %H:%M:%S'), 9502))
         
         # Race in completed stage
         db.execute('''
@@ -900,8 +774,7 @@ class TestOnlyProcessesLockedRaces:
         stage = db.execute('SELECT * FROM race_stages WHERE race_id = ?', (502,)).fetchone()
         assert stage['poll_count'] == 0, "Completed race should not be polled"
 
-    @responses.activate
-    def test_ri_007_only_polls_races_in_polling_stage(self, test_db, rm_with_db):
+    def test_ri_007_only_polls_races_in_polling_stage(self, test_db, rm_with_db, mock_get_podium):
         """RI-007: Only races in 'polling' stage are polled.
         
         Given multiple races in different stages
@@ -915,9 +788,9 @@ class TestOnlyProcessesLockedRaces:
         
         # Race 1: watching stage (should NOT be polled)
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, 'open')
-        ''', (511, 'Watching Race', 16, race_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, 'open', ?)
+        ''', (511, 'Watching Race', 16, race_time.strftime('%Y-%m-%d %H:%M:%S'), 9511))
         db.execute('''
             INSERT INTO race_stages (race_id, stage, entered_at, last_poll_at, poll_count)
             VALUES (?, 'watching', ?, NULL, 0)
@@ -925,9 +798,9 @@ class TestOnlyProcessesLockedRaces:
         
         # Race 2: locked stage (should NOT be polled)
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, 'locked')
-        ''', (512, 'Locked Race', 17, race_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, 'locked', ?)
+        ''', (512, 'Locked Race', 17, race_time.strftime('%Y-%m-%d %H:%M:%S'), 9512))
         db.execute('''
             INSERT INTO race_stages (race_id, stage, entered_at, last_poll_at, poll_count)
             VALUES (?, 'locked', ?, NULL, 0)
@@ -935,9 +808,9 @@ class TestOnlyProcessesLockedRaces:
         
         # Race 3: polling stage (SHOULD be polled)
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, 'locked')
-        ''', (513, 'Polling Race', 18, race_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, 'locked', ?)
+        ''', (513, 'Polling Race', 18, race_time.strftime('%Y-%m-%d %H:%M:%S'), 9513))
         db.execute('''
             INSERT INTO drivers (id, driver_id, name, number, code)
             VALUES (?, ?, ?, ?, ?)
@@ -957,9 +830,9 @@ class TestOnlyProcessesLockedRaces:
         
         # Race 4: completed stage (should NOT be polled)
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, 'completed')
-        ''', (514, 'Completed Race 2', 19, race_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, 'completed', ?)
+        ''', (514, 'Completed Race 2', 19, race_time.strftime('%Y-%m-%d %H:%M:%S'), 9514))
         db.execute('''
             INSERT INTO race_stages (race_id, stage, entered_at, last_poll_at, poll_count)
             VALUES (?, 'completed', ?, NULL, 0)
@@ -968,27 +841,11 @@ class TestOnlyProcessesLockedRaces:
         db.commit()
         
         # Mock the API for the polling race
-        responses.add(
-            responses.GET,
-            'https://api.jolpi.ca/ergast/f1/2026/18/results.json',
-            json={
-                "MRData": {
-                    "RaceTable": {
-                        "Races": [{
-                            "season": "2026",
-                            "round": "18",
-                            "raceName": "Polling Race",
-                            "Results": [
-                                {"position": "1", "Driver": {"code": "VER", "givenName": "Max", "familyName": "Verstappen"}, "Constructor": {"name": "Red Bull"}},
-                                {"position": "2", "Driver": {"code": "NOR", "givenName": "Lando", "familyName": "Norris"}, "Constructor": {"name": "McLaren"}},
-                                {"position": "3", "Driver": {"code": "LEC", "givenName": "Charles", "familyName": "Leclerc"}, "Constructor": {"name": "Ferrari"}},
-                            ]
-                        }]
-                    }
-                }
-            },
-            status=200
-        )
+        mock_get_podium.return_value = {
+            'p1': {'position': 1, 'driver_number': 1, 'driver_name': 'Max Verstappen'},
+            'p2': {'position': 2, 'driver_number': 4, 'driver_name': 'Lando Norris'},
+            'p3': {'position': 3, 'driver_number': 16, 'driver_name': 'Charles Leclerc'},
+        }
         
         now = race_time + timedelta(hours=2)
         rm.poll_for_results(db, now)
@@ -1011,8 +868,7 @@ class TestOnlyProcessesLockedRaces:
 class TestRaceStatusTransition:
     """Test race status transitions when results are ingested."""
 
-    @responses.activate
-    def test_race_status_transitions_to_completed(self, test_db, rm_with_db):
+    def test_race_status_transitions_to_completed(self, test_db, rm_with_db, mock_get_podium):
         """Race transitions from locked to completed after results ingested.
         
         Given a locked race is being polled
@@ -1024,9 +880,9 @@ class TestRaceStatusTransition:
         
         race_time = datetime(2026, 3, 28, 13, 0, 0, tzinfo=timezone.utc)
         db.execute('''
-            INSERT INTO races (id, name, round, date, status)
-            VALUES (?, ?, ?, ?, 'locked')
-        ''', (601, 'Status Transition Race', 20, race_time.strftime('%Y-%m-%d %H:%M:%S')))
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, 'locked', ?)
+        ''', (601, 'Status Transition Race', 20, race_time.strftime('%Y-%m-%d %H:%M:%S'), 9601))
         
         db.execute('''
             INSERT INTO drivers (id, driver_id, name, number, code)
@@ -1048,27 +904,11 @@ class TestRaceStatusTransition:
         
         db.commit()
         
-        responses.add(
-            responses.GET,
-            'https://api.jolpi.ca/ergast/f1/2026/20/results.json',
-            json={
-                "MRData": {
-                    "RaceTable": {
-                        "Races": [{
-                            "season": "2026",
-                            "round": "20",
-                            "raceName": "Status Transition Race",
-                            "Results": [
-                                {"position": "1", "Driver": {"code": "VER", "givenName": "Max", "familyName": "Verstappen"}, "Constructor": {"name": "Red Bull"}},
-                                {"position": "2", "Driver": {"code": "NOR", "givenName": "Lando", "familyName": "Norris"}, "Constructor": {"name": "McLaren"}},
-                                {"position": "3", "Driver": {"code": "LEC", "givenName": "Charles", "familyName": "Leclerc"}, "Constructor": {"name": "Ferrari"}},
-                            ]
-                        }]
-                    }
-                }
-            },
-            status=200
-        )
+        mock_get_podium.return_value = {
+            'p1': {'position': 1, 'driver_number': 1, 'driver_name': 'Max Verstappen'},
+            'p2': {'position': 2, 'driver_number': 4, 'driver_name': 'Lando Norris'},
+            'p3': {'position': 3, 'driver_number': 16, 'driver_name': 'Charles Leclerc'},
+        }
         
         now = race_time + timedelta(hours=2)
         rm.poll_for_results(db, now)

@@ -85,85 +85,82 @@ class TestF1ApiMockFixture:
 
 
 class TestRaceManagerWithMock:
-    """Test race_manager functions with mocked API (RI-010)."""
+    """Test race_manager functions with a mocked OpenF1 client (RI-010).
 
-    @responses.activate
-    def test_ri_010_mock_for_jolpi_ergast_endpoints(self):
-        """RI-010: Mock configured for Jolpi/Ergast API endpoints.
-        
-        Given the race_manager module uses F1 API
-        When _fetch_podium is called with mocked API
-        Then the correct podium data is returned
+    F1-01: race_manager now resolves podiums through src/openf1.py rather
+    than building Jolpi/Ergast URLs itself, so these mock openf1.get_podium
+    directly instead of registering HTTP fixtures.
+    """
+
+    def test_ri_010_fetch_podium_resolves_driver_ids(self):
+        """RI-010: _fetch_podium resolves an OpenF1 podium to DB driver ids.
+
+        Given openf1.get_podium returns a full podium
+        And the drivers table has matching car numbers
+        When _fetch_podium is called
+        Then the DB driver ids are returned
         """
         import os
-        os.environ['F1_API_URL'] = 'https://api.jolpi.ca/ergast/f1'
-        
-        # Mock the API response
-        responses.add(
-            responses.GET,
-            'https://api.jolpi.ca/ergast/f1/2026/1/results.json',
-            json={
-                "MRData": {
-                    "RaceTable": {
-                        "Races": [{
-                            "season": "2026",
-                            "round": "1",
-                            "raceName": "Bahrain Grand Prix",
-                            "Results": [
-                                {"position": "1", "Driver": {"code": "VER", "givenName": "Max", "familyName": "Verstappen", "displayName": "Max Verstappen"}, "Constructor": {"name": "Red Bull Racing"}},
-                                {"position": "2", "Driver": {"code": "NOR", "givenName": "Lando", "familyName": "Norris", "displayName": "Lando Norris"}, "Constructor": {"name": "McLaren"}},
-                                {"position": "3", "Driver": {"code": "LEC", "givenName": "Charles", "familyName": "Leclerc", "displayName": "Charles Leclerc"}, "Constructor": {"name": "Ferrari"}},
-                            ]
-                        }]
-                    }
-                }
-            },
-            status=200
-        )
-        
-        # Import after setting env and registering mock
         import sys
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'cron'))
-        
-        # Need to reimport to pick up new env
-        import importlib
-        import race_manager as rm
-        importlib.reload(rm)
-        
-        # Test fetching podium
-        podium = rm._fetch_podium(2026, 1)
-        
-        assert podium is not None
-        assert podium['p1']['driver_code'] == 'VER'
-        assert podium['p2']['driver_code'] == 'NOR'
-        assert podium['p3']['driver_code'] == 'LEC'
+        import sqlite3
+        from unittest.mock import patch
 
-    @responses.activate
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'cron'))
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
+        import race_manager as rm
+
+        db = sqlite3.connect(':memory:')
+        db.row_factory = sqlite3.Row
+        db.execute('''
+            CREATE TABLE drivers (
+                id INTEGER PRIMARY KEY, driver_id TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL, number INTEGER NOT NULL, code TEXT, nationality TEXT
+            )
+        ''')
+        db.executemany(
+            'INSERT INTO drivers (id, driver_id, name, number, code) VALUES (?, ?, ?, ?, ?)',
+            [(1, 'ver', 'Max Verstappen', 1, 'VER'),
+             (2, 'nor', 'Lando Norris', 4, 'NOR'),
+             (3, 'lec', 'Charles Leclerc', 16, 'LEC')],
+        )
+        db.commit()
+
+        openf1_podium = {
+            'p1': {'position': 1, 'driver_number': 1, 'driver_name': 'Max Verstappen'},
+            'p2': {'position': 2, 'driver_number': 4, 'driver_name': 'Lando Norris'},
+            'p3': {'position': 3, 'driver_number': 16, 'driver_name': 'Charles Leclerc'},
+        }
+
+        with patch('race_manager.openf1.get_podium', return_value=openf1_podium):
+            podium = rm._fetch_podium(db, session_key=123)
+
+        assert podium is not None
+        assert podium['p1']['driver_id'] == 1
+        assert podium['p2']['driver_id'] == 2
+        assert podium['p3']['driver_id'] == 3
+
     def test_ri_010_mock_returns_none_for_no_results(self):
-        """RI-010 variant: Mock returns None when race has no results yet.
-        
-        Given the API is mocked to return empty results
+        """RI-010 variant: None when race has no results yet.
+
+        Given openf1.get_podium returns None (race not complete)
         When _fetch_podium is called
         Then None is returned (indicating race not completed)
         """
         import os
-        os.environ['F1_API_URL'] = 'https://api.jolpi.ca/ergast/f1'
-        
-        responses.add(
-            responses.GET,
-            'https://api.jolpi.ca/ergast/f1/2026/99/results.json',
-            json={"MRData": {"RaceTable": {"Races": []}}},
-            status=200
-        )
-        
         import sys
+        import sqlite3
+        from unittest.mock import patch
+
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'cron'))
-        import importlib
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
         import race_manager as rm
-        importlib.reload(rm)
-        
-        podium = rm._fetch_podium(2026, 99)
-        
+
+        db = sqlite3.connect(':memory:')
+        db.row_factory = sqlite3.Row
+
+        with patch('race_manager.openf1.get_podium', return_value=None):
+            podium = rm._fetch_podium(db, session_key=999)
+
         assert podium is None
 
 
