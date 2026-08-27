@@ -125,6 +125,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             session_id TEXT PRIMARY KEY,
             username TEXT NOT NULL UNIQUE,
+            is_synthetic INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -259,6 +260,11 @@ def _apply_migrations(db):
         if column not in results:
             db.execute(ddl)
             app.logger.info('Migration: results.%s added', column)
+
+    users = _column_names(db, 'users')
+    if 'is_synthetic' not in users:
+        db.execute('ALTER TABLE users ADD COLUMN is_synthetic INTEGER DEFAULT 0')
+        app.logger.info('Migration: users.is_synthetic added')
 
 # --- API fetching ---
 
