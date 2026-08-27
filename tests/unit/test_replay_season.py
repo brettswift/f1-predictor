@@ -230,3 +230,44 @@ class TestReplayHarness:
 
         assert first[0] == 25  # users
         assert second == (0, 0, 0)
+
+    def test_different_seed_does_not_conflict_with_existing_synthetic_users(self, db):
+        """BUD-132 replay fix: usernames must be seed-scoped so a second seed
+        run inserts new users instead of being silently skipped by UNIQUE."""
+        _insert_drivers(db)
+        _insert_races_and_results(db, count=10)
+
+        result_1 = run_replay(2026, seed=1, db=db)
+        result_2 = run_replay(2026, seed=2, db=db)
+
+        # Both replays created their own 25 users
+        assert len(result_1["users"]) == 25
+        assert len(result_2["users"]) == 25
+
+        # No cross-seed username overlap
+        usernames_1 = {u[1] for u in result_1["users"]}
+        usernames_2 = {u[1] for u in result_2["users"]}
+        assert not usernames_1.intersection(usernames_2)
+
+        # All 50 synthetic users are in the DB (not silently skipped)
+        synthetic_count = db.execute(
+            "SELECT COUNT(*) FROM users WHERE is_synthetic = 1"
+        ).fetchone()[0]
+        assert synthetic_count == 50
+
+    def test_replay_import_does_not_load_app_module(self):
+        """BUD-132 replay fix: importing the replay module must not eagerly
+        import src.app (and therefore must not trigger init_db()) before the
+        CLI has had a chance to parse --db."""
+        import importlib
+        import sys
+
+        # Ensure a clean import observation.
+        module_name = "scripts.replay_season"
+        sys.modules.pop(module_name, None)
+        sys.modules.pop("app", None)
+
+        importlib.import_module(module_name)
+
+        assert "app" not in sys.modules
+        assert sys.modules[module_name]._app_module is None

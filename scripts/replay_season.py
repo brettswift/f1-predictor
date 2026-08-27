@@ -26,7 +26,16 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
-import app as app_module
+_app_module = None
+
+
+def _get_app_module():
+    """Lazy import of app so DB init happens after argparse has parsed --db."""
+    global _app_module
+    if _app_module is None:
+        import app as _app_module
+    return _app_module
+
 
 DEFAULT_SEASON = 2026
 DEFAULT_SYNTHETIC_USER_COUNT = 25
@@ -38,7 +47,7 @@ class ReplayError(Exception):
 
 
 def _db_path() -> str:
-    return os.environ.get("DATABASE_PATH", app_module.app.config["DATABASE"])
+    return os.environ.get("DATABASE_PATH", _get_app_module().app.config["DATABASE"])
 
 
 def _connect() -> sqlite3.Connection:
@@ -61,7 +70,7 @@ def _create_synthetic_users(
     """
     users: list[tuple[str, str]] = []
     for i in range(count):
-        username = f"synthetic_{i + 1:03d}"
+        username = f"synthetic_{seed}_{i + 1:03d}"
         session_id = _synthetic_uuid(season, seed, i)
         db.execute(
             "INSERT OR IGNORE INTO users (session_id, username, is_synthetic) VALUES (?, ?, 1)",
@@ -170,7 +179,7 @@ def _calculate_and_insert_scores(
             ).fetchone()
             if pred is None:
                 continue
-            points = app_module.calculate_score(dict(pred), result)
+            points = _get_app_module().calculate_score(dict(pred), result)
             db.execute(
                 """
                 INSERT INTO scores (user_id, race_id, points)
@@ -315,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.db:
         os.environ["DATABASE_PATH"] = args.db
-        app_module.app.config["DATABASE"] = args.db
+        _get_app_module().app.config["DATABASE"] = args.db
 
     if args.teardown:
         if not args.yes:
