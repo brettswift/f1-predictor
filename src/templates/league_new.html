@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}Create League - F1 Predictor{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>🏆 Create a League</h2>
+    <form method="POST" action="{{ url_for('create_league_route') }}">
+        <label for="name">Name</label>
+        <input type="text" id="name" name="name" placeholder="Office League" required>
+
+        <label for="emoji_or_color">Emoji or color</label>
+        <input type="text" id="emoji_or_color" name="emoji_or_color" placeholder="🏎️ or #e10600" required>
+
+        <label for="window">Scoring window</label>
+        <select id="window" name="window">
+            <option value="current" selected>Current round forward</option>
+            <option value="whole_season">Whole season</option>
+        </select>
+
+        <button type="submit" class="btn">Create league</button>
+    </form>
+</div>
+{% endblock %}
