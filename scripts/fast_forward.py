@@ -1,16 +1,32 @@
 #!/usr/bin/env python3
 """
-Fast-forward a race weekend for end-to-end testing.
+Fast-forward a full race weekend for end-to-end testing (BUD-135).
 
-Advances a single race through its lifecycle states in compressed wall-clock
-time and can inject mock OpenF1 results so scoring runs immediately.
+Drives one race end-to-end (open → locked → results ingested → scored) in
+well under 5 minutes by:
+
+  * Advancing virtual time with tests/utils/time_control.TimeController
+    (patches app._now_utc / race_manager._utcnow; no time.sleep calls).
+  * Transitioning results through the f1-mock-api's *real admin endpoints*:
+      POST /admin/race/<id>/start
+      POST /admin/race/<id>/podium
+      POST /admin/race/<id>/finish
+      POST /admin/reseed
+  * Triggering the predictor's existing scoring path
+    (cron/race_manager.poll_for_results) so scores/results/leaderboard
+    update exactly as they do in production.
+
+The predictor is pointed at the mock API through OPENF1_API_URL /
+OPENF1_BASE_URL / API_BASE_URL env vars.
 
 Usage:
-    python3 -m scripts.fast_forward --race-id 5 --results '{"p1": 1, "p2": 4, "p3": 16}'
-    python3 -m scripts.fast_forward --race-id 5 --reset
+    python -m scripts.fast_forward --race-id 5 \
+        --podium '{"p1": 1, "p2": 4, "p3": 16}' \
+        --mock-race-id 12
 
-The script manipulates the existing `races` row and `race_stages` state-machine
-table directly; it does not duplicate the scoring code in race_manager.py.
+    python -m scripts.fast_forward --race-id 5 --reset
+
+    python -m scripts.fast_forward --reseed --mock-race-id 12
 """
 from __future__ import annotations
 
@@ -20,22 +36,19 @@ import logging
 import os
 import sqlite3
 import sys
-import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-# project imports: cron/ for race_manager, src/ for openf1/fetch_attempts
+# project imports: cron/ for race_manager, src/ for app hooks.
 _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_root, 'cron'))
 sys.path.insert(0, os.path.join(_root, 'src'))
+sys.path.insert(0, _root)
 
-import openf1
+import requests
 import race_manager as rm
-from fetch_attempts import Outcome, record_fetch_attempt
 
-# Fast-forward is an offline simulation tool; it injects mock data and must
-# never call the live OpenF1 API.
-openf1.OFFLINE = True
+from tests.utils.time_control import TimeController
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,16 +59,23 @@ logger = logging.getLogger('fast_forward')
 DATABASE_PATH = os.environ.get('DATABASE_PATH', '/data/f1_predictions.db')
 F1_SEASON = int(os.environ.get('F1_SEASON', '2026'))
 
-# Lifecycle phases used by this simulator.  Not every phase maps to a distinct
-# DB status; some are logical states used only for observability/testing.
-PHASE_ORDER = ['open', 'closing_soon', 'locked', 'live', 'results_available']
+# Mock API base URL can come from any of these; explicit CLI wins.
+DEFAULT_MOCK_API_URL = (
+    os.environ.get('OPENF1_BASE_URL')
+    or os.environ.get('OPENF1_API_URL')
+    or os.environ.get('API_BASE_URL')
+    or ''
+)
 
-# Default delay between phase transitions (seconds).  Total = 4 * 30 = 120 s.
-DEFAULT_PHASE_DELAY = 30
+# Virtual time step used to advance between phases. The predictor's
+# ingest window requires the race to have started >= 90 min in the past,
+# and race_manager polling transitions require >= 1h30m since lock.
+DEFAULT_STEP_MINUTES = 20
 
-# Snapshot table lets --reset restore the exact pre-run state.
-SNAPSHOT_TABLE = 'fast_forward_snapshots'
 
+# ---------------------------------------------------------------------------
+# DB / snapshot helpers
+# ---------------------------------------------------------------------------
 
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DATABASE_PATH)
@@ -67,180 +87,230 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _now_iso() -> str:
-    return _utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+def _now_iso(now: Optional[datetime] = None) -> str:
+    return (now or _utcnow()).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
-def _parse_dt(s: Optional[str]) -> Optional[datetime]:
-    if not s:
-        return None
-    s = s.strip().replace('Z', '')
-    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d'):
-        try:
-            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-    return None
+SNAPSHOT_TABLE = 'fast_forward_snapshots'
 
 
 def _ensure_snapshot_table(db: sqlite3.Connection) -> None:
     db.execute(f'''
         CREATE TABLE IF NOT EXISTS {SNAPSHOT_TABLE} (
-            race_id              INTEGER PRIMARY KEY,
-            original_status      TEXT,
-            original_date        TEXT,
+            race_id INTEGER PRIMARY KEY,
+            original_status TEXT,
+            original_date TEXT,
             original_session_key INTEGER,
-            had_results          INTEGER NOT NULL DEFAULT 0,
-            created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     db.commit()
 
 
-def _ensure_race_stages_table(db: sqlite3.Connection) -> None:
-    rm.ensure_stage_table(db)
-
-
-def _load_race(db: sqlite3.Connection, race_id: int) -> Optional[sqlite3.Row]:
-    return db.execute('SELECT * FROM races WHERE id = ?', (race_id,)).fetchone()
-
-
 def _snapshot_race(db: sqlite3.Connection, race_id: int) -> None:
-    """Record the current race state so --reset can restore it later."""
     _ensure_snapshot_table(db)
-    race = _load_race(db, race_id)
+    race = db.execute('SELECT * FROM races WHERE id = ?', (race_id,)).fetchone()
     if race is None:
         raise ValueError(f"Race {race_id} not found")
-    had_results = db.execute(
-        'SELECT 1 FROM results WHERE race_id = ?', (race_id,)
-    ).fetchone() is not None
     db.execute(f'''
-        INSERT INTO {SNAPSHOT_TABLE}
-            (race_id, original_status, original_date, original_session_key, had_results)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO {SNAPSHOT_TABLE} (race_id, original_status, original_date, original_session_key)
+        VALUES (?, ?, ?, ?)
         ON CONFLICT(race_id) DO UPDATE SET
             original_status = excluded.original_status,
             original_date = excluded.original_date,
             original_session_key = excluded.original_session_key,
-            had_results = excluded.had_results,
             created_at = excluded.created_at
-    ''', (
-        race_id,
-        race['status'],
-        race['date'],
-        race['session_key'],
-        1 if had_results else 0,
-    ))
+    ''', (race_id, race['status'], race['date'], race['session_key']))
     db.commit()
 
 
 def _reset_race(db: sqlite3.Connection, race_id: int) -> bool:
-    """Restore race to the snapshot state and clean up generated data."""
+    """Restore race state and drop any generated results/scores/stages."""
     _ensure_snapshot_table(db)
     snap = db.execute(
         f'SELECT * FROM {SNAPSHOT_TABLE} WHERE race_id = ?', (race_id,)
     ).fetchone()
     if snap is None:
-        logger.error("No fast-forward snapshot found for race %s; cannot reset.", race_id)
+        logger.error('No snapshot found for race %s; cannot reset.', race_id)
         return False
 
-    # Restore the race row exactly.
     db.execute('''
-        UPDATE races
-        SET status = ?, date = ?, session_key = ?
-        WHERE id = ?
+        UPDATE races SET status = ?, date = ?, session_key = ? WHERE id = ?
     ''', (snap['original_status'], snap['original_date'],
           snap['original_session_key'], race_id))
-
-    # Remove anything the fast-forwarder may have created.
     db.execute('DELETE FROM results WHERE race_id = ?', (race_id,))
     db.execute('DELETE FROM scores WHERE race_id = ?', (race_id,))
     db.execute('DELETE FROM race_stages WHERE race_id = ?', (race_id,))
     db.execute(f'DELETE FROM {SNAPSHOT_TABLE} WHERE race_id = ?', (race_id,))
     db.commit()
-    logger.info("Reset race %s to original status=%s date=%s",
-                race_id, snap['original_status'], snap['original_date'])
+    logger.info('Reset race %s (status=%s)', race_id, snap['original_status'])
     return True
 
 
-def _driver_id_by_number(db: sqlite3.Connection, driver_number: int) -> Optional[int]:
-    row = db.execute(
-        'SELECT id FROM drivers WHERE number = ?', (driver_number,)
-    ).fetchone()
-    return row['id'] if row else None
+# ---------------------------------------------------------------------------
+# Mock API admin calls (all state transitions go through these endpoints)
+# ---------------------------------------------------------------------------
 
+class MockAdmin:
+    """Thin wrapper over f1-mock-api's admin endpoints."""
+
+    def __init__(self, base_url: str):
+        if not base_url:
+            raise ValueError('mock api base URL is required')
+        self.base = base_url.rstrip('/')
+
+    def _post(self, path: str, data: Optional[dict] = None) -> bool:
+        url = f'{self.base}{path}'
+        try:
+            resp = requests.post(url, data=data or {}, timeout=10)
+        except requests.RequestException as exc:
+            logger.error('POST %s failed: %s', url, exc)
+            return False
+        if resp.status_code not in (200, 302):
+            logger.error('POST %s -> %s', url, resp.status_code)
+            return False
+        logger.info('POST %s -> %s', url, resp.status_code)
+        return True
+
+    def set_start(self, race_id: int, start_override: str = '') -> bool:
+        return self._post(f'/admin/race/{race_id}/start',
+                          {'start_override': start_override})
+
+    def set_podium(self, race_id: int, p1: Any, p2: Any, p3: Any) -> bool:
+        return self._post(f'/admin/race/{race_id}/podium', {
+            'p1_driver_id': str(p1),
+            'p2_driver_id': str(p2),
+            'p3_driver_id': str(p3),
+        })
+
+    def finish(self, race_id: int) -> bool:
+        return self._post(f'/admin/race/{race_id}/finish')
+
+    def reseed(self) -> bool:
+        return self._post('/admin/reseed')
+
+
+# ---------------------------------------------------------------------------
+# Scoring trigger — uses the predictor's real ingestion path
+# ---------------------------------------------------------------------------
+
+def _trigger_ingest(db: sqlite3.Connection) -> None:
+    """Run race_manager's state machine once to process one pending race.
+
+    We patch its clock to match the TimeController's frozen value so all
+    transitions are deterministic and offline-safe.
+    """
+    time_now = getattr(rm, '_current_fast_forward_time', _utcnow)()
+    rm.promote_to_watching(db, time_now)
+    rm.promote_to_locked(db, time_now)
+    rm.promote_to_polling(db, time_now)
+    rm.poll_for_results(db, time_now)
+
+
+def _score_via_app(db: sqlite3.Connection) -> int:
+    """Run the predictor's own check_and_ingest_results (preferred hook)."""
+    import app as app_module  # imported lazily so script can run standalone
+
+    with app_module.app.app_context():
+        updated, _ = app_module.check_and_ingest_results(db)
+    return len(updated)
+
+
+# ---------------------------------------------------------------------------
+# Core driver
+# ---------------------------------------------------------------------------
 
 def _resolve_driver_id(db: sqlite3.Connection, value: Any) -> int:
     """Resolve a driver reference supplied as a DB id or OpenF1 car number."""
     try:
         value = int(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"Driver reference must be an integer, got {value!r}") from exc
+        raise ValueError(f'Driver reference must be an integer, got {value!r}') from exc
 
-    # If a driver with this id exists, treat it as a DB id.
     by_id = db.execute('SELECT 1 FROM drivers WHERE id = ?', (value,)).fetchone()
     if by_id:
         return value
 
-    # Otherwise treat it as an OpenF1 car number.
-    driver_id = _driver_id_by_number(db, value)
-    if driver_id is None:
-        raise ValueError(
-            f"No driver with id or car number {value} in the database"
-        )
-    return driver_id
+    row = db.execute('SELECT id FROM drivers WHERE number = ?', (value,)).fetchone()
+    if row:
+        return row['id']
+
+    raise ValueError(f'No driver with id or car number {value} in the database')
 
 
-def _build_podium(db: sqlite3.Connection, results_spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Convert a user-facing results spec into the internal podium shape."""
-    podium: dict[str, dict[str, Any]] = {}
-    for slot in ('p1', 'p2', 'p3'):
-        if slot not in results_spec:
-            raise ValueError(f"Results spec must include '{slot}'")
-        driver_id = _resolve_driver_id(db, results_spec[slot])
-        row = db.execute('SELECT name, number FROM drivers WHERE id = ?', (driver_id,)).fetchone()
-        if row is None:
-            raise ValueError(f"Resolved driver id {driver_id} for slot {slot} not found")
-        podium[slot] = {'driver_id': driver_id, 'driver_name': row['name']}
-    return podium
-
-
-def _record_mock_fetch_attempts(db: sqlite3.Connection, race_id: int, session_key: Optional[int]) -> None:
-    """Leave observability rows consistent with a successful OpenF1 fetch."""
-    record_fetch_attempt(
-        db, 'sessions',
-        f"sessions?year={F1_SEASON}&session_type=Race",
-        Outcome.OK, race_id=race_id,
+def _podium_to_mock_ids(db: sqlite3.Connection, spec: dict[str, Any]) -> tuple[int, int, int]:
+    """Resolve {p1,p2,p3} into mock-API driver ids (the predictor's DB ids)."""
+    return (
+        _resolve_driver_id(db, spec['p1']),
+        _resolve_driver_id(db, spec['p2']),
+        _resolve_driver_id(db, spec['p3']),
     )
-    if session_key:
-        record_fetch_attempt(
-            db, 'session_result',
-            f"session_result?session_key={session_key}",
-            Outcome.OK, session_key=session_key, race_id=race_id,
+
+
+def fast_forward(
+    db: sqlite3.Connection,
+    race_id: int,
+    results_spec: Optional[dict[str, Any]],
+    mock: Optional[MockAdmin] = None,
+    mock_race_id: Optional[int] = None,
+    step_minutes: int = DEFAULT_STEP_MINUTES,
+    frozen_at: Optional[datetime] = None,
+) -> None:
+    """
+    Run the race end-to-end through the predictor's real ingestion path.
+
+    The TimeController freezes _now_utc so subsequent calls to
+    app._now_utc/race_manager._utcnow return the simulated frozen value.
+    We advance the clock by `step_minutes` between phases.
+    """
+    race = db.execute('SELECT * FROM races WHERE id = ?', (race_id,)).fetchone()
+    if race is None:
+        raise ValueError(f'Race {race_id} not found')
+
+    rm.ensure_stage_table(db)
+
+    if race['status'] == 'completed':
+        raise ValueError(
+            f'Race {race_id} is already completed. Use --reset first if you want to rerun.'
         )
-
-
-def _set_phase(db: sqlite3.Connection, race_id: int, phase: str, now: datetime) -> None:
-    """Apply the DB mutations that represent a fast-forward phase."""
-    if phase == 'open':
-        # Nothing to do; race is expected to be open already.
-        return
-
-    if phase == 'closing_soon':
-        # Move the race start close to now while keeping it open.
-        # "Closing soon" means voting is still allowed but about to lock.
-        db.execute(
-            "UPDATE races SET status = 'open', date = ? WHERE id = ?",
-            (_now_iso(), race_id),
+    if race['status'] != 'open':
+        logger.warning(
+            'Race %s status is %s; fast-forward will assume open',
+            race_id, race['status'],
         )
+        db.execute("UPDATE races SET status = 'open' WHERE id = ?", (race_id,))
         db.commit()
-        return
 
-    if phase == 'locked':
-        db.execute(
-            "UPDATE races SET status = 'locked' WHERE id = ?",
-            (race_id,),
-        )
+    _snapshot_race(db, race_id)
+
+    controller = TimeController(target='app._now_utc')
+    controller.freeze(frozen_at or _utcnow())
+
+    # Some paths (cron/race_manager) call their own _utcnow; bind a tweakable
+    # clock hook that we update each step.
+    current_time = controller.frozen_time
+    rm._current_fast_forward_time = lambda: current_time  # type: ignore[attr-defined]
+
+    logger.info('Fast-forwarding race %s (%s) starting at %s',
+                race_id, race['name'], current_time.isoformat())
+
+    try:
+        def _advance() -> None:
+            nonlocal current_time
+            controller.advance(minutes=step_minutes)
+            current_time = controller.frozen_time
+            logger.info('advanced to %s', current_time.isoformat())
+
+        # Phase 1: race start (admin/race/<id>/start)
+        if mock and mock_race_id is not None:
+            mock.set_start(
+                mock_race_id,
+                start_override=_now_iso(controller.frozen_time),
+            )
+        _advance()
+
+        # Phase 2: lock in the predictor (auto-lock cron semantics)
+        db.execute("UPDATE races SET status = 'locked' WHERE id = ?", (race_id,))
         db.execute('''
             INSERT INTO race_stages (race_id, stage, entered_at)
             VALUES (?, 'locked', ?)
@@ -249,190 +319,136 @@ def _set_phase(db: sqlite3.Connection, race_id: int, phase: str, now: datetime) 
                 entered_at = excluded.entered_at,
                 last_poll_at = NULL,
                 poll_count = 0
-        ''', (race_id, _now_iso()))
+        ''', (race_id, _now_iso(controller.frozen_time)))
         db.commit()
-        return
+        _advance()
 
-    if phase == 'live':
-        # In the production model a live race is simply locked and in the past.
-        # No DB change required beyond what 'locked' already set, but we ensure
-        # the race date is in the past so downstream logic treats it as started.
-        db.execute(
-            "UPDATE races SET status = 'locked' WHERE id = ?",
+        # Phase 3: publish podium on the mock
+        if results_spec is None:
+            raise ValueError('podium results spec is required')
+        p1_id, p2_id, p3_id = _podium_to_mock_ids(db, results_spec)
+        if mock and mock_race_id is not None:
+            mock.set_podium(mock_race_id, p1_id, p2_id, p3_id)
+            logger.info('podium set at %s', controller.frozen_time.isoformat())
+        _advance()
+
+        # Phase 4: mock marks race finished
+        if mock and mock_race_id is not None:
+            mock.finish(mock_race_id)
+            logger.info('race finished at %s', controller.frozen_time.isoformat())
+        _advance()
+
+        # Phase 5: drive the predictor's real ingestion path
+        # race_manager.poll_for_results handles fetch_attempts + scoring.
+        _trigger_ingest(db)
+
+        if db.execute('SELECT 1 FROM results WHERE race_id = ?', (race_id,)).fetchone() is None:
+            logger.warning(
+                'poll_for_results did not ingest; falling back to app.check_and_ingest_results'
+            )
+            _score_via_app(db)
+
+        result_row = db.execute(
+            'SELECT p1_driver_id, p2_driver_id, p3_driver_id FROM results WHERE race_id = ?',
             (race_id,),
-        )
-        db.commit()
-        return
+        ).fetchone()
+        if result_row is None:
+            raise ValueError(f'results still missing for race {race_id} after ingest')
 
-    if phase == 'results_available':
-        # Final state is applied by inject_results; this helper just logs.
-        return
-
-    raise ValueError(f"Unknown phase: {phase}")
-
-
-def inject_results(
-    db: sqlite3.Connection,
-    race_id: int,
-    results_spec: dict[str, Any],
-    data_source: str = 'mock',
-) -> bool:
-    """Inject mock results and recalculate scores using race_manager paths."""
-    race = _load_race(db, race_id)
-    if race is None:
-        raise ValueError(f"Race {race_id} not found")
-
-    podium = _build_podium(db, results_spec)
-    session_key = race['session_key']
-
-    # For mock data we do not call OpenF1; record attempts so observers see
-    # a coherent fetch history.
-    _record_mock_fetch_attempts(db, race_id, session_key)
-
-    # Use the production result-save path (includes calculate_score + update scores).
-    rm._save_results_and_score(db, race_id, podium, session_key=session_key)
-
-    # Mirror poll_for_results: once results are saved, mark the stage completed.
-    db.execute('''
-        UPDATE race_stages
-        SET stage = 'completed', entered_at = ?, last_poll_at = ?, poll_count = poll_count + 1
-        WHERE race_id = ?
-    ''', (_now_iso(), _now_iso(), race_id))
-
-    # Tag the source as mock so operators know this was simulated.
-    db.execute(
-        "UPDATE results SET data_source = ? WHERE race_id = ?",
-        (data_source, race_id),
-    )
-    db.commit()
-
-    logger.info(
-        "Results injected for race %s: P1=%s P2=%s P3=%s",
-        race_id,
-        podium['p1']['driver_name'],
-        podium['p2']['driver_name'],
-        podium['p3']['driver_name'],
-    )
-    return True
+        scores = db.execute(
+            'SELECT COUNT(*) FROM scores WHERE race_id = ?', (race_id,)
+        ).fetchone()[0]
+        logger.info('race %s completed: P1=%s P2=%s P3=%s scores=%d row(s)',
+                    race_id, result_row['p1_driver_id'],
+                    result_row['p2_driver_id'], result_row['p3_driver_id'], scores)
+    finally:
+        controller.unfreeze()
+        if hasattr(rm, '_current_fast_forward_time'):
+            del rm._current_fast_forward_time  # type: ignore[attr-defined]
 
 
-def _parse_phase_delays(args: argparse.Namespace) -> dict[str, int]:
-    """Build a phase -> delay map from CLI options."""
-    delays: dict[str, int] = {}
-    if args.phase_delays:
-        try:
-            delays = json.loads(args.phase_delays)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid --phase-delays JSON: {exc}")
-        for phase in PHASE_ORDER:
-            if phase not in delays:
-                delays[phase] = DEFAULT_PHASE_DELAY
-    else:
-        delays = {phase: DEFAULT_PHASE_DELAY for phase in PHASE_ORDER}
-    return delays
-
-
-def fast_forward(
-    db: sqlite3.Connection,
-    race_id: int,
-    results_spec: Optional[dict[str, Any]],
-    phase_delays: dict[str, int],
-    skip_wait: bool = False,
-) -> None:
-    """Run the compressed lifecycle simulation for one race."""
-    race = _load_race(db, race_id)
-    if race is None:
-        raise ValueError(f"Race {race_id} not found")
-
-    _ensure_race_stages_table(db)
-    _snapshot_race(db, race_id)
-
-    # Ensure race starts open so the full lifecycle can be demonstrated.
-    if race['status'] == 'completed':
-        raise ValueError(
-            f"Race {race_id} is already completed. Use --reset first if you want to rerun."
-        )
-    if race['status'] != 'open':
-        logger.warning(
-            "Race %s status is '%s'; fast-forward will treat it as open",
-            race_id, race['status'],
-        )
-        db.execute("UPDATE races SET status = 'open' WHERE id = ?", (race_id,))
-        db.commit()
-
-    logger.info("Fast-forwarding race %s (%s)", race_id, race['name'])
-
-    start_time = _utcnow()
-    for i, phase in enumerate(PHASE_ORDER):
-        logger.info("Phase %d/%d: %s", i + 1, len(PHASE_ORDER), phase)
-        now = _utcnow()
-        _set_phase(db, race_id, phase, now)
-
-        if phase == 'results_available':
-            if results_spec is None:
-                raise ValueError(
-                    "Must provide --results to reach results_available phase"
-                )
-            inject_results(db, race_id, results_spec)
-            break
-
-        delay = phase_delays.get(phase, DEFAULT_PHASE_DELAY)
-        if delay > 0 and not skip_wait and i < len(PHASE_ORDER) - 1:
-            logger.info("  waiting %ds until next phase...", delay)
-            time.sleep(delay)
-
-    elapsed = (_utcnow() - start_time).total_seconds()
-    logger.info("Fast-forward complete in %.1fs", elapsed)
-
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def main(argv: Optional[list[str]] = None) -> int:
     global DATABASE_PATH
+
     parser = argparse.ArgumentParser(
         description='Fast-forward a race weekend for end-to-end testing'
     )
-    parser.add_argument('--race-id', type=int, required=True,
-                        help='Race id to fast-forward')
-    parser.add_argument('--results', type=str,
-                        help='Mock podium as JSON, e.g. {"p1":1,"p2":4,"p3":16} '
-                             '(driver db ids or OpenF1 car numbers)')
-    parser.add_argument('--phase-delays', type=str,
-                        help='JSON mapping phase names to seconds, '
-                             'e.g. {"open":0,"closing_soon":10,...}')
-    parser.add_argument('--skip-wait', action='store_true',
-                        help='Run all phase transitions immediately (tests)')
+    parser.add_argument('--race-id', type=int,
+                        help='Predictor race id to fast-forward')
+    parser.add_argument('--mock-race-id', type=int,
+                        help='Mock API race id to manipulate (defaults to --race-id)')
+    parser.add_argument('--podium', '--results', dest='podium', type=str,
+                        help='Mock podium JSON, e.g. {"p1":1,"p2":4,"p3":16}')
+    parser.add_argument('--mock-api-url', type=str, default=DEFAULT_MOCK_API_URL,
+                        help='f1-mock-api base URL (e.g., http://127.0.0.1:5001)')
     parser.add_argument('--reset', action='store_true',
-                        help='Restore race to pre-fast-forward state')
+                        help='Reset race to its pre-fast-forward state')
+    parser.add_argument('--reseed', action='store_true',
+                        help='Call POST /admin/reseed on the mock API')
+    parser.add_argument('--step-minutes', type=int, default=DEFAULT_STEP_MINUTES,
+                        help='Minutes to advance per phase (default 20)')
     parser.add_argument('--database', type=str, default=DATABASE_PATH,
-                        help='Path to SQLite database')
+                        help='Path to predictor SQLite database')
     args = parser.parse_args(argv)
 
+    if args.reset or args.reseed:
+        # reset/reseed still requires DB to be reachable.
+        if not os.path.exists(args.database):
+            logger.error('Database not found at %s', args.database)
+            return 1
+        DATABASE_PATH = args.database
+        db = get_db()
+        try:
+            if args.reseed:
+                mock = MockAdmin(args.mock_api_url)
+                ok = mock.reseed()
+                return 0 if ok else 1
+            ok = _reset_race(db, args.race_id)
+            return 0 if ok else 1
+        finally:
+            db.close()
+
+    if not args.race_id:
+        logger.error('--race-id is required unless --reseed')
+        return 1
+
     if not os.path.exists(args.database):
-        logger.error("Database not found at %s", args.database)
+        logger.error('Database not found at %s', args.database)
         return 1
 
     results_spec = None
-    if args.results:
+    if args.podium:
         try:
-            results_spec = json.loads(args.results)
+            results_spec = json.loads(args.podium)
         except json.JSONDecodeError as exc:
-            logger.error("Invalid --results JSON: %s", exc)
+            logger.error('Invalid --podium JSON: %s', exc)
             return 1
 
+    if results_spec is None:
+        logger.error('--podium (or --results) is required')
+        return 1
+
     DATABASE_PATH = args.database
-    os.environ['DATABASE_PATH'] = DATABASE_PATH
+    mock = MockAdmin(args.mock_api_url) if args.mock_api_url else None
+    mock_race_id = args.mock_race_id if args.mock_race_id is not None else args.race_id
 
     db = get_db()
     try:
-        if args.reset:
-            ok = _reset_race(db, args.race_id)
-            return 0 if ok else 1
-
-        phase_delays = _parse_phase_delays(args)
-        fast_forward(db, args.race_id, results_spec, phase_delays,
-                     skip_wait=args.skip_wait)
+        fast_forward(
+            db,
+            args.race_id,
+            results_spec,
+            mock=mock,
+            mock_race_id=mock_race_id,
+            step_minutes=args.step_minutes,
+        )
         return 0
     except ValueError as exc:
-        logger.error("%s", exc)
+        logger.error('%s', exc)
         return 1
     finally:
         db.close()

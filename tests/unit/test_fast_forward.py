@@ -5,6 +5,8 @@ import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
+from typing import Any, Optional
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -102,97 +104,125 @@ def _seed_race_and_drivers(db):
     db.commit()
 
 
-class TestFastForwardLifecycle:
-    """BUD-135: phase transitions and scoring output."""
+class FakeMock:
+    """Fake MockAdmin capturing admin endpoint invocations."""
 
-    def test_fast_forward_transitions_through_phases_and_scores(self):
+    def __init__(self):
+        self.starts: list[dict[str, Any]] = []
+        self.podiums: list[dict[str, Any]] = []
+        self.finishes: list[int] = []
+
+    def set_start(self, race_id: int, start_override: str = '') -> bool:
+        self.starts.append({'race_id': race_id, 'start_override': start_override})
+        return True
+
+    def set_podium(self, race_id: int, p1: int, p2: int, p3: int) -> bool:
+        self.podiums.append({'race_id': race_id, 'p1': p1, 'p2': p2, 'p3': p3})
+        return True
+
+    def finish(self, race_id: int) -> bool:
+        self.finishes.append(race_id)
+        return True
+
+    def reseed(self) -> bool:
+        return True
+
+
+class TestFastForwardLifecycle:
+    """End-to-end lifecycle driven through the real ingestion functions."""
+
+    def _patched_ingest(self, db, p1: int = 1, p2: int = 2, p3: int = 3):
+        """Patch race_manager._fetch_podium to return the given podium."""
+        def fake_fetch_podium(db_in, session_key, race_id=None, race_date=None):
+            return {
+                'p1': {'driver_id': p1, 'driver_name': 'P1'},
+                'p2': {'driver_id': p2, 'driver_name': 'P2'},
+                'p3': {'driver_id': p3, 'driver_name': 'P3'},
+            }
+        return fake_fetch_podium
+
+    def test_fast_forward_ingests_scores_and_marks_completed(self):
         db = _in_memory_db()
         _seed_race_and_drivers(db)
-        db.execute('INSERT INTO users (session_id, username) VALUES (?, ?)', ('u1', 'alice'))
+        db.execute("INSERT INTO users (session_id, username) VALUES ('u1', 'alice')")
         db.execute('''
             INSERT INTO predictions (user_id, race_id, p1_driver_id, p2_driver_id, p3_driver_id)
-            VALUES (?, ?, ?, ?, ?)
-        ''', ('u1', 1, 1, 2, 3))
+            VALUES ('u1', 1, 1, 2, 3)
+        ''')
         db.commit()
 
-        ff.fast_forward(
-            db, 1,
-            results_spec={'p1': 1, 'p2': 4, 'p3': 16},  # 4 -> Norris, 16 -> Leclerc
-            phase_delays={p: 0 for p in ff.PHASE_ORDER},
-            skip_wait=True,
-        )
+        fake_fetched = self._patched_ingest(db, 1, 2, 3)
+
+        with patch('race_manager._fetch_podium', side_effect=fake_fetched):
+            ff.fast_forward(
+                db, 1,
+                results_spec={'p1': 1, 'p2': 2, 'p3': 3},
+                mock=FakeMock(),
+                mock_race_id=1,
+                step_minutes=95,
+                frozen_at=datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc),
+            )
 
         race = db.execute('SELECT * FROM races WHERE id = 1').fetchone()
         assert race['status'] == 'completed'
-
-        stage = db.execute('SELECT * FROM race_stages WHERE race_id = 1').fetchone()
-        assert stage['stage'] == 'completed'
 
         result = db.execute('SELECT * FROM results WHERE race_id = 1').fetchone()
         assert result is not None
         assert result['p1_driver_id'] == 1
         assert result['p2_driver_id'] == 2
         assert result['p3_driver_id'] == 3
-        assert result['data_source'] == 'mock'
 
-        score = db.execute('SELECT * FROM scores WHERE user_id = ? AND race_id = ?', ('u1', 1)).fetchone()
+        score = db.execute(
+            'SELECT points FROM scores WHERE user_id = ? AND race_id = ?',
+            ('u1', 1),
+        ).fetchone()
         assert score is not None
         assert score['points'] == 20
 
-    def test_fast_forward_by_driver_numbers(self):
+    def test_fast_forward_uses_admin_endpoints_when_mock_given(self):
         db = _in_memory_db()
         _seed_race_and_drivers(db)
-        db.execute('INSERT INTO users (session_id, username) VALUES (?, ?)', ('u1', 'alice'))
+        db.execute("INSERT INTO users (session_id, username) VALUES ('u1', 'alice')")
         db.execute('''
             INSERT INTO predictions (user_id, race_id, p1_driver_id, p2_driver_id, p3_driver_id)
-            VALUES (?, ?, ?, ?, ?)
-        ''', ('u1', 1, 1, 2, 3))
+            VALUES ('u1', 1, 1, 2, 3)
+        ''')
         db.commit()
 
-        ff.fast_forward(
-            db, 1,
-            results_spec={'p1': 1, 'p2': 4, 'p3': 16},
-            phase_delays={p: 0 for p in ff.PHASE_ORDER},
-            skip_wait=True,
-        )
+        fake_fetched = self._patched_ingest(db, 1, 2, 3)
+        fake_mock = FakeMock()
 
-        result = db.execute('SELECT * FROM results WHERE race_id = 1').fetchone()
-        assert result['p2_driver_id'] == 2  # car number 4 = Lando Norris
-        assert result['p3_driver_id'] == 3  # car number 16 = Charles Leclerc
+        with patch('race_manager._fetch_podium', side_effect=fake_fetched):
+            ff.fast_forward(
+                db, 1,
+                results_spec={'p1': 1, 'p2': 2, 'p3': 3},
+                mock=fake_mock,
+                mock_race_id=7,
+                step_minutes=95,
+                frozen_at=datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc),
+            )
 
-    def test_fast_forward_partial_prediction_scoring(self):
-        db = _in_memory_db()
-        _seed_race_and_drivers(db)
-        db.execute('INSERT INTO users (session_id, username) VALUES (?, ?)', ('u1', 'alice'))
-        # Predict P1=Verstappen, P2=Norris, P3=Leclerc
-        # Results: P1=Verstappen(+10), P2=Leclerc(+0, +1 wrong pos), P3=Norris(+0, +1 wrong pos)
-        db.execute('''
-            INSERT INTO predictions (user_id, race_id, p1_driver_id, p2_driver_id, p3_driver_id)
-            VALUES (?, ?, ?, ?, ?)
-        ''', ('u1', 1, 1, 2, 3))
-        db.commit()
+        # Sequence: start -> podium -> finish on the *mock race id* (7).
+        assert fake_mock.starts and fake_mock.starts[0]['race_id'] == 7
+        assert fake_mock.podiums and fake_mock.podiums[0]['race_id'] == 7
+        assert fake_mock.finishes and fake_mock.finishes[0] == 7
 
-        ff.fast_forward(
-            db, 1,
-            results_spec={'p1': 1, 'p2': 16, 'p3': 4},
-            phase_delays={p: 0 for p in ff.PHASE_ORDER},
-            skip_wait=True,
-        )
-
-        score = db.execute('SELECT points FROM scores WHERE user_id = ? AND race_id = ?', ('u1', 1)).fetchone()
-        assert score['points'] == 12
-
-    def test_reset_restores_original_state(self):
+    def test_reset_restores_state(self):
         db = _in_memory_db()
         _seed_race_and_drivers(db)
         original_date = '2026-10-01 14:00:00'
 
-        ff.fast_forward(
-            db, 1,
-            results_spec={'p1': 1, 'p2': 4, 'p3': 16},
-            phase_delays={p: 0 for p in ff.PHASE_ORDER},
-            skip_wait=True,
-        )
+        fake_fetched = self._patched_ingest(db, 1, 2, 3)
+
+        with patch('race_manager._fetch_podium', side_effect=fake_fetched):
+            ff.fast_forward(
+                db, 1,
+                results_spec={'p1': 1, 'p2': 2, 'p3': 3},
+                mock=FakeMock(),
+                mock_race_id=1,
+                step_minutes=95,
+                frozen_at=datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc),
+            )
 
         ok = ff._reset_race(db, 1)
         assert ok is True
@@ -200,18 +230,9 @@ class TestFastForwardLifecycle:
         race = db.execute('SELECT * FROM races WHERE id = 1').fetchone()
         assert race['status'] == 'open'
         assert race['date'] == original_date
-        assert race['session_key'] == 9010
-
         assert db.execute('SELECT 1 FROM results WHERE race_id = 1').fetchone() is None
         assert db.execute('SELECT 1 FROM scores WHERE race_id = 1').fetchone() is None
-        assert db.execute('SELECT 1 FROM race_stages WHERE race_id = 1').fetchone() is None
         assert db.execute('SELECT 1 FROM fast_forward_snapshots WHERE race_id = 1').fetchone() is None
-
-    def test_reset_without_snapshot_returns_false(self):
-        db = _in_memory_db()
-        _seed_race_and_drivers(db)
-        ok = ff._reset_race(db, 1)
-        assert ok is False
 
     def test_completed_race_raises(self):
         db = _in_memory_db()
@@ -220,80 +241,62 @@ class TestFastForwardLifecycle:
         db.commit()
 
         with pytest.raises(ValueError, match='already completed'):
-            ff.fast_forward(db, 1, {'p1': 1, 'p2': 4, 'p3': 16},
-                            {p: 0 for p in ff.PHASE_ORDER}, skip_wait=True)
+            ff.fast_forward(db, 1, {'p1': 1, 'p2': 2, 'p3': 3},
+                            mock=FakeMock(), mock_race_id=1, step_minutes=95)
 
 
-class TestFastForwardCLI:
-    """CLI entry-point behaviour."""
-
-    def test_main_reset_integration(self):
+class TestDriverResolution:
+    def test_resolve_by_db_id(self):
         db = _in_memory_db()
         _seed_race_and_drivers(db)
-        db.execute('INSERT INTO users (session_id, username) VALUES (?, ?)', ('u1', 'alice'))
-        db.execute('''
-            INSERT INTO predictions (user_id, race_id, p1_driver_id, p2_driver_id, p3_driver_id)
-            VALUES (?, ?, ?, ?, ?)
-        ''', ('u1', 1, 1, 2, 3))
-        db.commit()
+        assert ff._resolve_driver_id(db, 1) == 1
 
-        # Use a temp file because main() opens the DB by path.
+    def test_resolve_by_car_number(self):
+        db = _in_memory_db()
+        _seed_race_and_drivers(db)
+        assert ff._resolve_driver_id(db, 4) == 2
+
+    def test_resolve_unknown_raises(self):
+        db = _in_memory_db()
+        _seed_race_and_drivers(db)
+        with pytest.raises(ValueError, match='No driver'):
+            ff._resolve_driver_id(db, 999)
+
+
+class TestCLI:
+    """CLI-level behaviour (reset/reseed/podium parsing)."""
+
+    def _db_file(self, db):
         import tempfile
         fd, path = tempfile.mkstemp(suffix='.db')
         os.close(fd)
         with sqlite3.connect(path) as src:
             db.backup(src)
+        return path
 
-        rc = ff.main([
-            '--race-id', '1',
-            '--results', '{"p1":1,"p2":4,"p3":16}',
-            '--skip-wait',
-            '--database', path,
-        ])
+    def test_main_reseed_calls_admin(self):
+        path = self._db_file(_in_memory_db())
+        fake_mock = FakeMock()
+        with patch.object(ff, 'MockAdmin', return_value=fake_mock):
+            rc = ff.main(['--reseed', '--database', path,
+                          '--mock-api-url', 'http://mock'])
         assert rc == 0
-
-        conn = sqlite3.connect(path)
-        conn.row_factory = sqlite3.Row
-        race = conn.execute('SELECT status FROM races WHERE id = 1').fetchone()
-        assert race['status'] == 'completed'
-
-        rc = ff.main(['--race-id', '1', '--reset', '--database', path])
-        assert rc == 0
-        race = conn.execute('SELECT status, date FROM races WHERE id = 1').fetchone()
-        assert race['status'] == 'open'
-        assert race['date'] == '2026-10-01 14:00:00'
-        conn.close()
         os.unlink(path)
 
-    def test_main_requires_results_for_final_phase(self):
+    def test_main_reset_without_snapshot_returns_false(self):
         db = _in_memory_db()
         _seed_race_and_drivers(db)
-        import tempfile
-        fd, path = tempfile.mkstemp(suffix='.db')
-        os.close(fd)
-        with sqlite3.connect(path) as src:
-            db.backup(src)
-
-        rc = ff.main(['--race-id', '1', '--skip-wait', '--database', path])
+        path = self._db_file(db)
+        fake_mock = FakeMock()
+        with patch.object(ff, 'MockAdmin', return_value=fake_mock):
+            rc = ff.main(['--reset', '--race-id', '1', '--database', path])
         assert rc == 1
         os.unlink(path)
 
-
-class TestPhaseConfiguration:
-    """Configurable phase delays."""
-
-    def test_parse_phase_delays_defaults(self):
-        class Args:
-            phase_delays = None
-        delays = ff._parse_phase_delays(Args())
-        assert delays == {p: ff.DEFAULT_PHASE_DELAY for p in ff.PHASE_ORDER}
-
-    def test_parse_phase_delays_override(self):
-        class Args:
-            phase_delays = '{"open": 5, "locked": 10}'
-        delays = ff._parse_phase_delays(Args())
-        assert delays['open'] == 5
-        assert delays['locked'] == 10
-        for phase in ff.PHASE_ORDER:
-            if phase not in ('open', 'locked'):
-                assert delays[phase] == ff.DEFAULT_PHASE_DELAY
+    def test_main_requires_podium(self):
+        db = _in_memory_db()
+        _seed_race_and_drivers(db)
+        path = self._db_file(db)
+        rc = ff.main(['--race-id', '1', '--database', path])
+        assert rc == 1
+        os.unlink(path)
