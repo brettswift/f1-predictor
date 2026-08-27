@@ -40,6 +40,24 @@ spec:
           value: ""
         - name: USE_STUB_API
           value: "false"
+        - name: GOOGLE_OAUTH_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: f1-predictor-secret
+              key: google-oauth-client-id
+              optional: true
+        - name: GOOGLE_OAUTH_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: f1-predictor-secret
+              key: google-oauth-client-secret
+              optional: true
+        - name: GOOGLE_OAUTH_REDIRECT_URI
+          valueFrom:
+            secretKeyRef:
+              name: f1-predictor-secret
+              key: google-oauth-redirect-uri
+              optional: true
         resources:
           limits:
             cpu: "500m"

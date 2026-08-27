@@ -70,6 +70,18 @@ All data is pulled from the F1 API (Ergast/Jolpica). No hardcoded races or fallb
 
 Votes lock automatically when the race start time passes. Results are user-triggered: a "Check for Race Results" button appears when races have started (90+ min ago) and have no results. Clicking it checks the F1 API; if no results yet, the page auto-retries every 2 minutes (max 10 times). No background polling.
 
+### Google OAuth (optional second sign-in method)
+
+Set these to enable "Sign in with Google" alongside email magic-link auth. If unset, the Google sign-in option is hidden and only magic-link auth is available.
+
+- **GOOGLE_OAUTH_CLIENT_ID**: OAuth client ID from Google Cloud Console.
+- **GOOGLE_OAUTH_CLIENT_SECRET**: OAuth client secret from Google Cloud Console.
+- **GOOGLE_OAUTH_REDIRECT_URI**: Callback URL registered with Google, e.g. `https://f1.brettswift.com/login/oauth/google/callback`.
+
+To get credentials: Google Cloud Console → APIs & Services → Credentials → Create OAuth client ID (Web application) → add the redirect URI above to "Authorized redirect URIs".
+
+Values are stored in the `f1-predictor-secret` Kubernetes Secret (keys `google-oauth-client-id`, `google-oauth-client-secret`, `google-oauth-redirect-uri`) and wired into the deployment in `base/deployment.yaml`, same pattern as `DRIVER_REFRESH_SECRET`.
+
 ## DNS
 
 Managed via external-dns annotations in ingress manifests:

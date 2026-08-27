@@ -18,6 +18,7 @@ Environment variables:
 - `ENVIRONMENT`: `dev` or `prod` - controls DEV badge display
 - `API_BASE_URL`: External API base URL (empty for no external API)
 - `USE_STUB_API`: `true` or `false` - use stub API for testing
+- `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI`: optional "Sign in with Google" support; see [DEPLOYMENT.md](./DEPLOYMENT.md#google-oauth-optional-second-sign-in-method) for setup
 
 ## Image
 
