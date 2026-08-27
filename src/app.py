@@ -48,6 +48,19 @@ LIVE_CACHE_TTL_SEC = 5  # Cache live data for 5 seconds
 LOGIN_TOKEN_BYTES = 32  # URL-safe token length
 LOGIN_TOKEN_TTL_MINUTES = 15  # Token validity window
 
+# Google OAuth configuration
+GOOGLE_AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth'
+GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token'
+GOOGLE_USERINFO_ENDPOINT = 'https://openidconnect.googleapis.com/v1/userinfo'
+GOOGLE_OAUTH_SCOPE = 'openid email profile'
+
+app.config['GOOGLE_OAUTH_CLIENT_ID'] = os.environ.get('GOOGLE_OAUTH_CLIENT_ID', '')
+app.config['GOOGLE_OAUTH_CLIENT_SECRET'] = os.environ.get('GOOGLE_OAUTH_CLIENT_SECRET', '')
+app.config['GOOGLE_OAUTH_REDIRECT_URI'] = os.environ.get(
+    'GOOGLE_OAUTH_REDIRECT_URI',
+    ''
+)
+
 # Simple in-memory cache for live data (keyed by race_id)
 _live_data_cache = {}
 
@@ -1047,6 +1060,74 @@ def bind_email_to_session(email):
     return new_session_id
 
 
+def _get_google_oauth_redirect_uri():
+    """Return the configured Google OAuth redirect URI, or derive one."""
+    configured = app.config.get('GOOGLE_OAUTH_REDIRECT_URI', '')
+    if configured:
+        return configured
+    return url_for('login_oauth_google_callback', _external=True)
+
+
+def _generate_oauth_state():
+    """Generate a short-lived CSRF state token for the OAuth flow."""
+    return secrets.token_urlsafe(16)
+
+
+def _google_auth_url(state):
+    """Build the Google OAuth authorization request URL."""
+    params = {
+        'client_id': app.config['GOOGLE_OAUTH_CLIENT_ID'],
+        'redirect_uri': _get_google_oauth_redirect_uri(),
+        'response_type': 'code',
+        'scope': GOOGLE_OAUTH_SCOPE,
+        'state': state,
+        'access_type': 'online',
+    }
+    return f'{GOOGLE_AUTH_ENDPOINT}?{urlencode(params)}'
+
+
+def _exchange_google_code(code):
+    """Exchange an authorization code for Google OAuth tokens.
+
+    Returns the JSON token response on success, or None on failure.
+    """
+    try:
+        response = requests.post(
+            GOOGLE_TOKEN_ENDPOINT,
+            data={
+                'code': code,
+                'client_id': app.config['GOOGLE_OAUTH_CLIENT_ID'],
+                'client_secret': app.config['GOOGLE_OAUTH_CLIENT_SECRET'],
+                'redirect_uri': _get_google_oauth_redirect_uri(),
+                'grant_type': 'authorization_code',
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        app.logger.warning(f'Google token exchange failed: {e}')
+        return None
+
+
+def _fetch_google_userinfo(access_token):
+    """Fetch the user's Google profile via the OAuth userinfo endpoint.
+
+    Returns a dict with at least an 'email' key on success, or None.
+    """
+    try:
+        response = requests.get(
+            GOOGLE_USERINFO_ENDPOINT,
+            headers={'Authorization': f'Bearer {access_token}'},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        app.logger.warning(f'Google userinfo fetch failed: {e}')
+        return None
+
+
 def calculate_score(prediction, result):
     """Calculate score for a prediction."""
     points = 0
@@ -1762,6 +1843,59 @@ def login_verify(token):
 
     bind_email_to_session(email)
     flash('You are now logged in.', 'success')
+    return redirect(url_for('home'))
+
+
+@app.route('/login/oauth/google')
+def login_oauth_google():
+    """Initiate Google OAuth sign-in."""
+    client_id = app.config.get('GOOGLE_OAUTH_CLIENT_ID', '')
+    if not client_id:
+        flash('Google sign-in is not configured.', 'error')
+        return redirect(url_for('login'))
+
+    state = _generate_oauth_state()
+    session['oauth_state'] = state
+    return redirect(_google_auth_url(state))
+
+
+@app.route('/login/oauth/google/callback')
+def login_oauth_google_callback():
+    """Handle the Google OAuth callback and log the user in."""
+    stored_state = session.pop('oauth_state', None)
+    returned_state = request.args.get('state')
+    if not stored_state or not returned_state or stored_state != returned_state:
+        flash('Invalid OAuth state. Please try again.', 'error')
+        return redirect(url_for('login'))
+
+    code = request.args.get('code')
+    if not code:
+        flash('Google sign-in was cancelled or failed.', 'error')
+        return redirect(url_for('login'))
+
+    token_response = _exchange_google_code(code)
+    if not token_response:
+        flash('Unable to verify Google sign-in.', 'error')
+        return redirect(url_for('login'))
+
+    access_token = token_response.get('access_token')
+    if not access_token:
+        flash('Unable to verify Google sign-in.', 'error')
+        return redirect(url_for('login'))
+
+    userinfo = _fetch_google_userinfo(access_token)
+    if not userinfo or not userinfo.get('email'):
+        flash('Unable to retrieve your email from Google.', 'error')
+        return redirect(url_for('login'))
+
+    email = userinfo['email']
+    if not userinfo.get('email_verified'):
+        flash('Please use a Google account with a verified email.', 'error')
+        return redirect(url_for('login'))
+
+    bind_email_to_session(email)
+    session.permanent = True
+    flash('You are now logged in with Google.', 'success')
     return redirect(url_for('home'))
 
 
