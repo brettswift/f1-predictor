@@ -15,6 +15,9 @@ import requests
 from datetime import datetime, timezone, timedelta
 
 from functools import wraps
+from urllib.parse import urlencode
+
+import click
 from flask import Flask, render_template, request, redirect, url_for, session, g, flash, jsonify
 
 import openf1
@@ -72,6 +75,12 @@ def inject_environment():
         app_version=os.environ.get('APP_VERSION', ''),
         f1_season=app.config['F1_SEASON']
     )
+
+
+@app.context_processor
+def inject_current_user():
+    """Make the current user available to all templates as current_user."""
+    return dict(current_user=get_current_user())
 
 # Database helpers
 def get_db():
@@ -133,6 +142,7 @@ def init_db():
             session_id TEXT PRIMARY KEY,
             username TEXT NOT NULL UNIQUE,
             email TEXT UNIQUE,
+            legacy_user INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -265,6 +275,14 @@ def _apply_migrations(db):
     if 'email' not in users:
         db.execute('ALTER TABLE users ADD COLUMN email TEXT UNIQUE')
         app.logger.info('Migration: users.email added')
+
+    if 'legacy_user' not in users:
+        db.execute('ALTER TABLE users ADD COLUMN legacy_user INTEGER DEFAULT 0')
+        db.execute('''
+            UPDATE users SET legacy_user = 1
+            WHERE email IS NULL OR email = ''
+        ''')
+        app.logger.info('Migration: users.legacy_user added and flagged existing anonymous users')
 
     races = _column_names(db, 'races')
     if 'session_key' not in races:
@@ -849,6 +867,11 @@ def is_admin(user):
     return user and user['username'].strip().lower() in ADMIN_USERNAMES
 
 
+def is_legacy_user(user):
+    """Return True for existing anonymous users who still need email migration."""
+    return user is not None and user['legacy_user'] and not user['email']
+
+
 def admin_required(f):
     """Decorator: require admin user for lock/enter-results routes."""
     @wraps(f)
@@ -976,8 +999,10 @@ def bind_email_to_session(email):
     if current_user and not current_user['email']:
         # Upgrade anonymous user in-place; username stays the same.
         try:
-            db.execute('UPDATE users SET email = ? WHERE session_id = ?',
-                       (normalized, current_session_id))
+            db.execute(
+                'UPDATE users SET email = ?, legacy_user = 0 WHERE session_id = ?',
+                (normalized, current_session_id)
+            )
             db.commit()
             return current_session_id
         except sqlite3.IntegrityError:
@@ -993,9 +1018,9 @@ def bind_email_to_session(email):
     while True:
         try:
             db.execute('''
-                INSERT INTO users (session_id, username, email)
-                VALUES (?, ?, ?)
-            ''', (new_session_id, username, normalized))
+                INSERT INTO users (session_id, username, email, legacy_user)
+                VALUES (?, ?, ?, ?)
+            ''', (new_session_id, username, normalized, 0))
             db.commit()
             break
         except sqlite3.IntegrityError:
@@ -1101,11 +1126,12 @@ def set_username():
         # Reuse existing user's session_id
         session_id = existing['session_id']
     else:
-        # Create new user with new session_id
+        # Create new user with new session_id; new anonymous users are not
+        # flagged as legacy (they signed up after email auth was available).
         session_id = str(uuid.uuid4())
         db.execute(
-            'INSERT INTO users (session_id, username) VALUES (?, ?)',
-            (session_id, username)
+            'INSERT INTO users (session_id, username, legacy_user) VALUES (?, ?, ?)',
+            (session_id, username, 0)
         )
         db.commit()
 
@@ -1755,6 +1781,83 @@ def debug_magic_link(email):
     })
 
 
+@app.route('/migrate', methods=['GET'])
+def migrate():
+    """Show legacy-user migration prompt.
+
+    Legacy users (existing anonymous users created before email auth) land
+    here from the banner or direct link to add an email and keep their
+    prediction history.
+    """
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+    if user['email']:
+        flash('Your account already has an email.', 'info')
+        return redirect(url_for('home'))
+    return render_template('migrate.html', user=user)
+
+
+@app.route('/migrate/send', methods=['POST'])
+def migrate_send():
+    """Create a magic link for a legacy user migrating to email login.
+
+    Refuses emails already bound to another account so the current
+    session's predictions are not orphaned by bind_email_to_session.
+    """
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+    if user['email']:
+        flash('Your account already has an email.', 'info')
+        return redirect(url_for('home'))
+
+    email = request.form.get('email', '').strip()
+    normalized = _normalize_email(email)
+    if not normalized or '@' not in normalized:
+        flash('Please enter a valid email address', 'error')
+        return redirect(url_for('migrate'))
+
+    db = get_db()
+    existing = _find_user_by_email(db, normalized)
+    if existing and existing['session_id'] != user['session_id']:
+        flash(
+            'That email is already linked to another account. '
+            'Log out and use Log in with email, or choose a different email.',
+            'error'
+        )
+        return redirect(url_for('migrate'))
+
+    create_login_token(email)
+    return render_template('migrate_sent.html', email=normalized)
+
+
+@app.route('/admin/legacy-users', methods=['GET', 'POST'])
+@admin_required
+def admin_legacy_users():
+    """List legacy users and allow admins to trigger migration emails."""
+    db = get_db()
+
+    if request.method == 'POST':
+        email = request.form.get('email', '').strip()
+        normalized = _normalize_email(email)
+        if normalized and '@' in normalized:
+            create_login_token(email)
+            flash(f'Migration link created for {normalized}.', 'success')
+        else:
+            flash('Please enter a valid email address', 'error')
+        return redirect(url_for('admin_legacy_users'))
+
+    users = db.execute('''
+        SELECT session_id, username, email, created_at
+        FROM users
+        WHERE (email IS NULL OR email = '') AND legacy_user = 1
+        ORDER BY created_at ASC
+    ''').fetchall()
+
+    return render_template('admin_legacy_users.html', users=users)
+
+
 # Admin routes
 @app.route('/admin/enter-results/<int:race_id>', methods=['GET', 'POST'])
 @admin_required
@@ -1977,6 +2080,43 @@ def before_request():
         return
     # Include predict and admin routes so /predict/N cannot bypass lock after race start
     auto_lock_races()
+
+
+# CLI commands
+@app.cli.command('list-legacy-users')
+def cli_list_legacy_users():
+    """List users who still need email migration."""
+    db = get_db()
+    users = db.execute('''
+        SELECT session_id, username, email, created_at
+        FROM users
+        WHERE (email IS NULL OR email = '') AND legacy_user = 1
+        ORDER BY created_at ASC
+    ''').fetchall()
+
+    if not users:
+        click.echo('No legacy users pending migration.')
+        return
+
+    click.echo(f'{len(users)} legacy user(s) pending migration:')
+    for user in users:
+        click.echo(
+            f"  - {user['username']} "
+            f"(session={user['session_id']}, created={user['created_at']})"
+        )
+
+
+@app.cli.command('send-migration-email')
+@click.argument('email')
+def cli_send_migration_email(email):
+    """Create a magic link for EMAIL and log it (stubbed sender)."""
+    normalized = _normalize_email(email)
+    if not normalized or '@' not in normalized:
+        raise click.BadParameter('Please provide a valid email address.')
+
+    create_login_token(email)
+    click.echo(f'Migration magic link created for {normalized}.')
+    click.echo('Check application logs or /debug/magic-link for the link.')
 
 
 # Initialize database on startup
