@@ -9,6 +9,7 @@ Votes lock when the race starts. Results are user-triggered via a button with br
 
 import os
 import uuid
+import secrets
 import sqlite3
 import requests
 from datetime import datetime, timezone, timedelta
@@ -38,6 +39,10 @@ RETRY_INTERVAL_SEC = 120
 LIVE_REFRESH_INTERVAL_SEC = 30  # Auto-refresh every 30 seconds
 LIVE_RATE_LIMIT_SEC = 10  # Minimum time between API calls
 LIVE_CACHE_TTL_SEC = 5  # Cache live data for 5 seconds
+
+# Magic-link authentication configuration
+LOGIN_TOKEN_BYTES = 32  # URL-safe token length
+LOGIN_TOKEN_TTL_MINUTES = 15  # Token validity window
 
 # Simple in-memory cache for live data (keyed by race_id)
 _live_data_cache = {}
@@ -125,7 +130,20 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             session_id TEXT PRIMARY KEY,
             username TEXT NOT NULL UNIQUE,
+            email TEXT UNIQUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # Magic-link login tokens
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS login_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            token TEXT NOT NULL UNIQUE,
+            used INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL
         )
     ''')
 
@@ -241,6 +259,11 @@ def _apply_migrations(db):
     new columns need an explicit ALTER. Every migration here is additive and
     idempotent — safe to run on every startup.
     """
+    users = _column_names(db, 'users')
+    if 'email' not in users:
+        db.execute('ALTER TABLE users ADD COLUMN email TEXT UNIQUE')
+        app.logger.info('Migration: users.email added')
+
     races = _column_names(db, 'races')
     if 'session_key' not in races:
         # OpenF1 keys results by session_key; without it we cannot fetch results.
@@ -850,6 +873,131 @@ def get_current_user():
         'SELECT * FROM users WHERE session_id = ?', (session_id,)
     ).fetchone()
     return user
+
+
+def _normalize_email(email):
+    """Normalize email for storage and lookup."""
+    return (email or '').strip().lower()
+
+
+def _generate_login_token():
+    """Generate a URL-safe one-time login token."""
+    return secrets.token_urlsafe(LOGIN_TOKEN_BYTES)
+
+
+def _login_token_url(token):
+    """Build the relative magic-link URL for a token."""
+    return url_for('login_verify', token=token, _external=False)
+
+
+def create_login_token(email):
+    """Create a magic-link token for the given email and log it for debug/tests.
+
+    Returns the raw token string. In production this would send an email;
+    here we log the link to stdout so tests and dev can retrieve it.
+    """
+    db = get_db()
+    normalized = _normalize_email(email)
+    token = _generate_login_token()
+    expires_at = _now_utc() + timedelta(minutes=LOGIN_TOKEN_TTL_MINUTES)
+
+    db.execute('''
+        INSERT INTO login_tokens (email, token, expires_at)
+        VALUES (?, ?, ?)
+    ''', (normalized, token, expires_at.strftime('%Y-%m-%d %H:%M:%S')))
+    db.commit()
+
+    link = _login_token_url(token)
+    app.logger.info('MAGIC-LINK email=%s token=%s link=%s', normalized, token, link)
+    return token
+
+
+def _get_token_record(db, token):
+    """Fetch a non-expired token record, or None if invalid/expired."""
+    now = _now_utc().strftime('%Y-%m-%d %H:%M:%S')
+    return db.execute('''
+        SELECT * FROM login_tokens
+        WHERE token = ? AND used = 0 AND expires_at > ?
+    ''', (token, now)).fetchone()
+
+
+def _find_user_by_email(db, email):
+    """Fetch user by normalized email."""
+    return db.execute(
+        'SELECT * FROM users WHERE email = ?', (_normalize_email(email),)
+    ).fetchone()
+
+
+def consume_login_token(token):
+    """Validate a login token and return the associated email.
+
+    Returns the normalized email on success, or None if the token is invalid,
+    expired, or already used. Marks the token as used on success.
+    """
+    db = get_db()
+    record = _get_token_record(db, token)
+    if not record:
+        return None
+
+    db.execute('UPDATE login_tokens SET used = 1 WHERE id = ?', (record['id'],))
+    db.commit()
+    return record['email']
+
+
+def bind_email_to_session(email):
+    """Ensure a user row exists for the email and attach it to the session.
+
+    If a user with this email already exists, their session_id becomes the
+    current session. Otherwise a new user is created (or the current anonymous
+    user is upgraded when possible) and the email is bound to it.
+    """
+    db = get_db()
+    normalized = _normalize_email(email)
+    existing = _find_user_by_email(db, normalized)
+
+    if existing:
+        session['session_id'] = existing['session_id']
+        return existing['session_id']
+
+    current_session_id = session.get('session_id')
+    current_user = None
+    if current_session_id:
+        current_user = db.execute(
+            'SELECT * FROM users WHERE session_id = ?', (current_session_id,)
+        ).fetchone()
+
+    if current_user and not current_user['email']:
+        # Upgrade anonymous user in-place; username stays the same.
+        try:
+            db.execute('UPDATE users SET email = ? WHERE session_id = ?',
+                       (normalized, current_session_id))
+            db.commit()
+            return current_session_id
+        except sqlite3.IntegrityError:
+            # Race: another session claimed the email; fall through to create new.
+            pass
+
+    # Create a fresh user bound to this email.
+    new_session_id = str(uuid.uuid4())
+    # Derive a username from the email local part; ensure uniqueness.
+    base_username = normalized.split('@')[0] or 'user'
+    username = base_username
+    attempt = 1
+    while True:
+        try:
+            db.execute('''
+                INSERT INTO users (session_id, username, email)
+                VALUES (?, ?, ?)
+            ''', (new_session_id, username, normalized))
+            db.commit()
+            break
+        except sqlite3.IntegrityError:
+            username = f"{base_username}_{attempt}"
+            attempt += 1
+
+    session['session_id'] = new_session_id
+    return new_session_id
+
 
 def calculate_score(prediction, result):
     """Calculate score for a prediction."""
@@ -1530,11 +1678,73 @@ def live_leaderboard(race_id):
     )
 
 
+@app.route('/login', methods=['GET'])
+def login():
+    """Show email login form."""
+    return render_template('login.html')
+
+
+@app.route('/login/request', methods=['POST'])
+def login_request():
+    """Request a magic-link login email."""
+    email = request.form.get('email', '').strip()
+    if not email or '@' not in email:
+        flash('Please enter a valid email address', 'error')
+        return redirect(url_for('login'))
+
+    create_login_token(email)
+    return render_template('login_sent.html', email=_normalize_email(email))
+
+
+@app.route('/login/verify/<token>')
+def login_verify(token):
+    """Consume a magic-link token and log the user in."""
+    email = consume_login_token(token)
+    if not email:
+        flash('That login link is invalid or has expired.', 'error')
+        return redirect(url_for('login'))
+
+    bind_email_to_session(email)
+    flash('You are now logged in.', 'success')
+    return redirect(url_for('home'))
+
+
 @app.route('/logout')
 def logout():
     """Clear session."""
     session.clear()
     return redirect(url_for('index'))
+
+
+@app.route('/debug/magic-link/<email>')
+def debug_magic_link(email):
+    """Debug endpoint: return the latest unused magic link for an email.
+
+    Only available in dev/test environments so tests can retrieve tokens
+    without parsing stdout.
+    """
+    if app.config.get('ENVIRONMENT') != 'dev' and not os.environ.get('TESTING'):
+        return jsonify({'error': 'Not available'}), 404
+
+    db = get_db()
+    normalized = _normalize_email(email)
+    now = _now_utc().strftime('%Y-%m-%d %H:%M:%S')
+    row = db.execute('''
+        SELECT token, expires_at FROM login_tokens
+        WHERE email = ? AND used = 0 AND expires_at > ?
+        ORDER BY created_at DESC LIMIT 1
+    ''', (normalized, now)).fetchone()
+
+    if not row:
+        return jsonify({'token': None, 'link': None})
+
+    token = row['token']
+    return jsonify({
+        'token': token,
+        'link': _login_token_url(token),
+        'expires_at': row['expires_at'],
+    })
+
 
 # Admin routes
 @app.route('/admin/enter-results/<int:race_id>', methods=['GET', 'POST'])
