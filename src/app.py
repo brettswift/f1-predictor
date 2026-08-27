@@ -52,10 +52,11 @@ def auto_lock_races():
     """Set status to 'locked' for races that have started (open + date in past)."""
     try:
         db = get_db()
+        cutoff = _now_utc().strftime('%Y-%m-%d %H:%M:%S')
         db.execute('''
             UPDATE races SET status = 'locked'
-            WHERE status = 'open' AND datetime(date) < datetime('now')
-        ''')
+            WHERE status = 'open' AND datetime(date) < datetime(?)
+        ''', (cutoff,))
         db.commit()
     except Exception as e:
         app.logger.warning(f"auto_lock_races: {e}")
