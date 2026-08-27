@@ -142,6 +142,19 @@ class TestCacheFallback:
             openf1.get_session_result(999, db=db)
 
     @responses.activate
+    def test_rate_limit_exhaustion_falls_through_to_cache_not_error(self, db):
+        """AC: being rate-limited must never surface an error when a
+        last-known-good cache entry exists — exactly like an outage."""
+        responses.add(responses.GET, f"{BASE}/session_result", json=RESULTS, status=200)
+        openf1.get_session_result(200, db=db)
+        responses.reset()
+        for _ in range(openf1.RETRY_ATTEMPTS):
+            responses.add(responses.GET, f"{BASE}/session_result", status=429)
+        result = openf1.get_session_result(200, db=db)
+        assert result.from_cache is True
+        assert [r["position"] for r in result.data] == [1, 2, 3]
+
+    @responses.activate
     def test_error_carries_status_code_for_outcome_classification(self, db):
         """BUD-125: OpenF1Error exposes status_code so callers can record a
         specific fetch_attempts outcome (e.g. rate_limited) without parsing
@@ -183,6 +196,182 @@ class TestCacheFallback:
                    ("sessions?x=1", "{not json", datetime.now(timezone.utc).isoformat()))
         db.commit()
         assert openf1._cache_read(db, "sessions?x=1") is None
+
+
+class TestRateLimitBackoff:
+    """F1-08 / BUD-167: a 429 gets its own Retry-After-aware, budgeted
+    backoff instead of the linear 1.5s*attempt used for a general transport
+    failure."""
+
+    @responses.activate
+    def test_429_with_header_honors_retry_after(self, db, monkeypatch):
+        monkeypatch.setattr(openf1, "MIN_REQUEST_INTERVAL_SEC", 0)  # isolate from the rate ceiling
+        sleeps = []
+        monkeypatch.setattr(openf1.time, "sleep", lambda s: sleeps.append(s))
+        responses.add(responses.GET, f"{BASE}/session_result",
+                      status=429, headers={"Retry-After": "30"})
+        responses.add(responses.GET, f"{BASE}/session_result", json=RESULTS, status=200)
+
+        result = openf1.get_session_result(200, db=db)
+
+        assert result.from_cache is False
+        assert sleeps == [30.0]  # honored in full, not the linear 1.5s
+
+    @responses.activate
+    def test_429_without_header_uses_exponential_jitter_not_linear(self, db, monkeypatch):
+        monkeypatch.setattr(openf1, "MIN_REQUEST_INTERVAL_SEC", 0)  # isolate from the rate ceiling
+        sleeps = []
+        monkeypatch.setattr(openf1.time, "sleep", lambda s: sleeps.append(s))
+        # Full jitter: pin random.uniform(0, x) -> x for a deterministic assertion.
+        monkeypatch.setattr(openf1.random, "uniform", lambda lo, hi: hi)
+        responses.add(responses.GET, f"{BASE}/session_result", status=429)
+        responses.add(responses.GET, f"{BASE}/session_result", status=429)
+        responses.add(responses.GET, f"{BASE}/session_result", json=RESULTS, status=200)
+
+        result = openf1.get_session_result(200, db=db)
+
+        assert result.from_cache is False
+        base = openf1.RATE_LIMIT_BACKOFF_BASE_SEC
+        assert sleeps == [base, base * 2]  # doubles per attempt
+        assert sleeps != [openf1.RETRY_BACKOFF_SEC * 1, openf1.RETRY_BACKOFF_SEC * 2]
+
+    @responses.activate
+    def test_429_with_cache_serves_cache_not_error(self, db, monkeypatch):
+        """429-with-cache: exhausting the rate-limit budget must fall
+        through to last-known-good exactly like an outage does."""
+        monkeypatch.setattr(openf1.time, "sleep", lambda s: None)
+        responses.add(responses.GET, f"{BASE}/sessions", json=SESSIONS, status=200)
+        openf1.get_race_sessions(season=2026, db=db)
+        responses.reset()
+        for _ in range(openf1.RETRY_ATTEMPTS):
+            responses.add(responses.GET, f"{BASE}/sessions", status=429)
+
+        result = openf1.get_race_sessions(season=2026, db=db)
+
+        assert result.from_cache is True
+
+    @responses.activate
+    def test_retry_budget_bounded_below_cron_window(self, db, monkeypatch):
+        """A single oversized Retry-After must not be honored past the
+        configured budget — the call fails fast to cache/error instead of
+        sleeping long enough to overrun the CronJob's run window."""
+        monkeypatch.setattr(openf1, "MIN_REQUEST_INTERVAL_SEC", 0)  # isolate from the rate ceiling
+        sleeps = []
+        monkeypatch.setattr(openf1.time, "sleep", lambda s: sleeps.append(s))
+        monkeypatch.setattr(openf1, "RATE_LIMIT_MAX_WAIT_SEC", 60.0)
+        responses.add(responses.GET, f"{BASE}/session_result",
+                      status=429, headers={"Retry-After": "500"})
+        for _ in range(openf1.RETRY_ATTEMPTS - 1):
+            responses.add(responses.GET, f"{BASE}/session_result",
+                          status=429, headers={"Retry-After": "500"})
+
+        with pytest.raises(openf1.OpenF1Error) as exc_info:
+            openf1.get_session_result(999, db=db)
+
+        assert sleeps == []  # gave up immediately rather than sleeping 500s
+        assert exc_info.value.status_code == 429
+        assert "rate limit" in str(exc_info.value).lower()
+
+    @responses.activate
+    def test_429_error_message_and_status_distinguish_from_transport_failure(self, db, monkeypatch):
+        """AC: different log lines / exception detail for 429 vs a general
+        transport failure, and OpenF1Error still carries the 429 marker
+        BUD-125's outcome_for_error() keys off."""
+        monkeypatch.setattr(openf1.time, "sleep", lambda s: None)
+        for _ in range(openf1.RETRY_ATTEMPTS):
+            responses.add(responses.GET, f"{BASE}/session_result", status=429)
+
+        with pytest.raises(openf1.OpenF1Error) as rate_limited_exc:
+            openf1.get_session_result(998, db=db)
+
+        responses.reset()
+        for _ in range(openf1.RETRY_ATTEMPTS):
+            responses.add(responses.GET, f"{BASE}/session_result", status=500)
+
+        with pytest.raises(openf1.OpenF1Error) as transport_exc:
+            openf1.get_session_result(999, db=db)
+
+        assert "rate limit" in str(rate_limited_exc.value).lower()
+        assert "rate limit" not in str(transport_exc.value).lower()
+        assert rate_limited_exc.value.status_code == 429
+        assert transport_exc.value.status_code == 500
+
+    @responses.activate
+    def test_403_with_quota_body_treated_as_rate_limited(self, db, monkeypatch):
+        """OpenF1 has been observed returning 403 for quota exhaustion; when
+        the body says so, treat it the same as a 429."""
+        monkeypatch.setattr(openf1.time, "sleep", lambda s: None)
+        for _ in range(openf1.RETRY_ATTEMPTS):
+            responses.add(responses.GET, f"{BASE}/session_result",
+                          status=403, json={"error": "quota exceeded"})
+
+        with pytest.raises(openf1.OpenF1Error) as exc_info:
+            openf1.get_session_result(997, db=db)
+
+        assert "rate limit" in str(exc_info.value).lower()
+
+    @responses.activate
+    def test_plain_403_is_not_treated_as_rate_limited(self, db, monkeypatch):
+        """A 403 with no quota signal must stay on the general failure path
+        (linear backoff, generic error message)."""
+        monkeypatch.setattr(openf1.time, "sleep", lambda s: None)
+        for _ in range(openf1.RETRY_ATTEMPTS):
+            responses.add(responses.GET, f"{BASE}/session_result",
+                          status=403, json={"error": "forbidden"})
+
+        with pytest.raises(openf1.OpenF1Error) as exc_info:
+            openf1.get_session_result(996, db=db)
+
+        assert "rate limit" not in str(exc_info.value).lower()
+
+
+class TestRequestRateCeiling:
+    """F1-08 / BUD-167: a process-wide floor on request spacing so a dev
+    loop or test run can't burst past OpenF1's documented limit."""
+
+    def test_default_matches_documented_openf1_limit(self):
+        # OpenF1 maintainer: "30 [requests] every 10 seconds"
+        # (github.com/br-g/openf1 issue #113, 2024-10-26).
+        assert openf1.MIN_REQUEST_INTERVAL_SEC == pytest.approx(10 / 30)
+
+    @responses.activate
+    def test_back_to_back_requests_are_spaced_by_the_floor(self, db, monkeypatch):
+        sleeps = []
+        monkeypatch.setattr(openf1.time, "sleep", lambda s: sleeps.append(s))
+        monkeypatch.setattr(openf1, "MIN_REQUEST_INTERVAL_SEC", 5.0)
+        monkeypatch.setattr(openf1, "_last_request_monotonic", None)
+        responses.add(responses.GET, f"{BASE}/sessions", json=SESSIONS, status=200)
+        responses.add(responses.GET, f"{BASE}/meetings", json=[], status=200)
+
+        openf1.get_race_sessions(season=2026, db=db)
+        openf1.get_meetings(season=2026, db=db)
+
+        assert any(s > 0 for s in sleeps)
+
+    @responses.activate
+    def test_zero_interval_disables_the_ceiling(self, db, monkeypatch):
+        sleeps = []
+        monkeypatch.setattr(openf1.time, "sleep", lambda s: sleeps.append(s))
+        monkeypatch.setattr(openf1, "MIN_REQUEST_INTERVAL_SEC", 0)
+        monkeypatch.setattr(openf1, "_last_request_monotonic", None)
+        responses.add(responses.GET, f"{BASE}/sessions", json=SESSIONS, status=200)
+        responses.add(responses.GET, f"{BASE}/meetings", json=[], status=200)
+
+        openf1.get_race_sessions(season=2026, db=db)
+        openf1.get_meetings(season=2026, db=db)
+
+        assert sleeps == []
+
+    def test_env_tunable(self, monkeypatch):
+        """OPENF1_MIN_REQUEST_INTERVAL_SEC actually drives the module
+        constant, not just an unused env var."""
+        monkeypatch.setenv("OPENF1_MIN_REQUEST_INTERVAL_SEC", "0.75")
+        import importlib
+        try:
+            reloaded = importlib.reload(openf1)
+            assert reloaded.MIN_REQUEST_INTERVAL_SEC == pytest.approx(0.75)
+        finally:
+            importlib.reload(openf1)  # restore real env-derived defaults
 
 
 class TestDataAge:
