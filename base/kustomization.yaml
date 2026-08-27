@@ -8,3 +8,4 @@ resources:
 - image-refresh-hook.yaml
 - image-refresh-rbac.yaml
 - race-manager-cronjob.yaml
+- lock-races-cronjob.yaml

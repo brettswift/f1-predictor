@@ -237,3 +237,18 @@ class TestLockRacesCronJobManifest:
     def test_cj_015_failed_jobs_history_limit(self, cronjob_spec):
         """CJ-015: Failed jobs history is retained."""
         assert cronjob_spec['spec'].get('failedJobsHistoryLimit') == 2
+
+    def test_cj_015_in_base_kustomization(self):
+        """CJ-015: lock-races CronJob is wired into base kustomization.
+
+        The standalone CronJob only provides reliability if it is actually
+        deployed. This guards against the manifest being present on disk but
+        forgotten in the base kustomization resources list.
+        """
+        kust_path = os.path.join(
+            os.path.dirname(__file__), '..', '..', 'base', 'kustomization.yaml'
+        )
+        with open(kust_path) as f:
+            kust = yaml.safe_load(f)
+        assert 'lock-races-cronjob.yaml' in kust.get('resources', []), \
+            "base/kustomization.yaml must include lock-races-cronjob.yaml"
