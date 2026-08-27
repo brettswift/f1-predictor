@@ -573,6 +573,26 @@ def _set_cached_live_data(race_id, data):
     }
 
 
+class LivePositions(list):
+    """
+    Live standings plus cache provenance (F1-02).
+
+    Behaves exactly like the plain list of position dicts it always was —
+    subclassing keeps every existing truthiness/indexing/iteration call site
+    working unchanged — but callers that care can read `.from_cache`,
+    `.is_stale` and `.age_label` to render a data-age indicator instead of
+    silently serving last-known-good data as if it were live.
+    """
+
+    def __init__(self, positions, from_cache=False, is_stale=False,
+                 age_label=None, fetched_at=None):
+        super().__init__(positions)
+        self.from_cache = from_cache
+        self.is_stale = is_stale
+        self.age_label = age_label
+        self.fetched_at = fetched_at
+
+
 def fetch_live_race_data(db, race):
     """
     Current classification for a race from OpenF1.
@@ -584,7 +604,8 @@ def fetch_live_race_data(db, race):
     if not session_key:
         return None
     try:
-        results = openf1.get_session_result(session_key, db=db).data
+        result_cached = openf1.get_session_result(session_key, db=db)
+        results = result_cached.data
         if not results:
             return None
         drivers = {d.get('driver_number'): d
@@ -617,7 +638,13 @@ def fetch_live_race_data(db, race):
             'points': row.get('points', 0) or 0,
             'fastest_lap': '',
         })
-    return positions
+    return LivePositions(
+        positions,
+        from_cache=result_cached.from_cache,
+        is_stale=result_cached.is_stale,
+        age_label=result_cached.age_label() if result_cached.from_cache else None,
+        fetched_at=result_cached.fetched_at,
+    )
 
 
 def calculate_projected_points(prediction, current_positions):
@@ -1394,16 +1421,28 @@ def live_leaderboard(race_id):
     else:
         # Fetch fresh live data from API
         live_positions = fetch_live_race_data(db, race)
-        
+
         if live_positions:
             _set_cached_live_data(race_id, live_positions)
             api_available = True
-            last_updated = _now_utc().strftime('%Y-%m-%d %H:%M:%S')
+            # F1-02: when OpenF1 itself is down, fetch_live_race_data falls
+            # back to the last-known-good cache rather than raising — report
+            # the cached payload's real age instead of claiming "now".
+            if live_positions.from_cache:
+                last_updated = live_positions.fetched_at.strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                last_updated = _now_utc().strftime('%Y-%m-%d %H:%M:%S')
         else:
             # LL-008: Graceful fallback - use empty/placeholder data
             api_available = False
             live_positions = []
             last_updated = None
+
+    # F1-02 data-age indicator: surfaced whenever positions came from the
+    # last-known-good cache (OpenF1 was unreachable), not just when stale.
+    data_from_cache = getattr(live_positions, 'from_cache', False)
+    data_stale = getattr(live_positions, 'is_stale', False)
+    data_age_label = getattr(live_positions, 'age_label', None)
     
     # Get all predictions for this race with projected points
     predictions = db.execute('''
@@ -1481,6 +1520,9 @@ def live_leaderboard(race_id):
         api_available=api_available,
         last_updated=last_updated,
         refresh_interval=LIVE_REFRESH_INTERVAL_SEC,
+        data_from_cache=data_from_cache,
+        data_stale=data_stale,
+        data_age_label=data_age_label,
     )
 
 

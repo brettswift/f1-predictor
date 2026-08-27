@@ -159,8 +159,17 @@
 {% if not api_available %}
 <div class="api-unavailable">
     <p><strong>⚠️ Live data temporarily unavailable</strong></p>
-    <p style="font-size: 14px; margin-bottom: 0;">The F1 API is not responding. The page will automatically retry. 
+    <p style="font-size: 14px; margin-bottom: 0;">The F1 API is not responding. The page will automatically retry.
     Your predictions are saved and points will be calculated once data is restored.</p>
+</div>
+{% elif data_from_cache %}
+{# F1-02: OpenF1 was unreachable; positions below are the last-known-good
+   cache, not a live read. Never show this silently — always say so. #}
+<div class="api-unavailable">
+    <p><strong>{% if data_stale %}⚠️{% else %}ℹ️{% endif %} Showing cached data{% if data_age_label %} from {{ data_age_label }}{% endif %}</strong></p>
+    <p style="font-size: 14px; margin-bottom: 0;">The F1 API isn't responding right now, so this is the last result we
+    successfully fetched{% if data_age_label %} ({{ data_age_label }}){% endif %}, not a live update. The page will
+    keep retrying automatically.</p>
 </div>
 {% endif %}
 
@@ -203,7 +212,9 @@
         </table>
     </div>
     {% if last_updated %}
-    <p class="last-updated">Last updated: {{ last_updated }} UTC</p>
+    <p class="last-updated">
+        {% if data_from_cache %}Last known-good fetch: {{ last_updated }} UTC (cached){% else %}Last updated: {{ last_updated }} UTC{% endif %}
+    </p>
     {% endif %}
 </div>
 {% endif %}
@@ -320,7 +331,8 @@
 
 {% if last_updated %}
 <p class="last-updated">
-    Auto-refreshes every {{ refresh_interval }} seconds · Last API update: {{ last_updated }} UTC
+    Auto-refreshes every {{ refresh_interval }} seconds ·
+    {% if data_from_cache %}Last known-good fetch: {{ last_updated }} UTC (cached{% if data_age_label %}, {{ data_age_label }}{% endif %}){% else %}Last API update: {{ last_updated }} UTC{% endif %}
 </p>
 {% endif %}
 {% endblock %}
