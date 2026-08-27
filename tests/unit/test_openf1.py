@@ -142,6 +142,27 @@ class TestCacheFallback:
             openf1.get_session_result(999, db=db)
 
     @responses.activate
+    def test_error_carries_status_code_for_outcome_classification(self, db):
+        """BUD-125: OpenF1Error exposes status_code so callers can record a
+        specific fetch_attempts outcome (e.g. rate_limited) without parsing
+        the message string."""
+        responses.add(responses.GET, f"{BASE}/session_result", status=429)
+        with pytest.raises(openf1.OpenF1Error) as exc_info:
+            openf1.get_session_result(999, db=db)
+        assert exc_info.value.status_code == 429
+        assert exc_info.value.is_timeout is False
+
+    def test_error_carries_is_timeout(self, db, monkeypatch):
+        def raise_timeout(*args, **kwargs):
+            raise requests.Timeout("timed out")
+
+        monkeypatch.setattr(openf1.requests, "get", raise_timeout)
+        with pytest.raises(openf1.OpenF1Error) as exc_info:
+            openf1.get_session_result(999, db=db)
+        assert exc_info.value.is_timeout is True
+        assert exc_info.value.status_code is None
+
+    @responses.activate
     def test_retries_before_giving_up(self, db):
         responses.add(responses.GET, f"{BASE}/session_result", status=500)
         responses.add(responses.GET, f"{BASE}/session_result", status=500)

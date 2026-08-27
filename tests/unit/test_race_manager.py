@@ -285,7 +285,7 @@ class TestRaceManagerStateMachine:
         
         # Mock the OpenF1-backed podium fetch (driver ids already resolved,
         # same shape _fetch_podium returns after matching by car number).
-        def mock_fetch_podium(db, session_key):
+        def mock_fetch_podium(db, session_key, race_id=None, race_date=None):
             assert session_key == 9005
             return {
                 'p1': {'driver_id': 1, 'driver_name': 'Max Verstappen'},
@@ -340,7 +340,7 @@ class TestRaceManagerStateMachine:
         db.commit()
         
         # Mock API returning no results
-        def mock_fetch_podium(db, session_key):
+        def mock_fetch_podium(db, session_key, race_id=None, race_date=None):
             return None
 
         monkeypatch.setattr('race_manager._fetch_podium', mock_fetch_podium)

@@ -17,6 +17,7 @@ from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, session, g, flash, jsonify
 
 import openf1
+import fetch_attempts
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -216,6 +217,9 @@ def init_db():
 
     # Last-known-good cache for upstream reads (F1-02)
     openf1.ensure_cache_table(db)
+
+    # Fetch-attempt observability (F1-03 / BUD-125)
+    fetch_attempts.ensure_fetch_attempts_table(db)
 
     _apply_migrations(db)
 
@@ -1729,8 +1733,23 @@ def check_results():
 
 @app.route('/health')
 def health():
-    """Health check endpoint."""
-    return jsonify({'status': 'healthy'})
+    """
+    Health check endpoint.
+
+    Includes last-successful-fetch age so BUD-164's external observer can
+    tell fetch failures are happening without shelling into the pod or
+    needing DB access of its own — it just reads this endpoint.
+    """
+    db = get_db()
+    last_ok = fetch_attempts.last_successful_fetch_at(db)
+    payload = {
+        'status': 'healthy',
+        'last_successful_fetch_at': last_ok.isoformat() if last_ok else None,
+        'last_successful_fetch_age_seconds': (
+            round((datetime.now(timezone.utc) - last_ok).total_seconds()) if last_ok else None
+        ),
+    }
+    return jsonify(payload)
 
 @app.before_request
 def before_request():
