@@ -88,6 +88,12 @@ def create_test_db(db_path):
             p1_driver_id INTEGER NOT NULL,
             p2_driver_id INTEGER NOT NULL,
             p3_driver_id INTEGER NOT NULL,
+            had_safety_car INTEGER,
+            safety_car_count INTEGER,
+            had_virtual_safety_car INTEGER,
+            virtual_safety_car_count INTEGER,
+            data_source TEXT,
+            recorded_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (race_id) REFERENCES races(id)
         )

@@ -75,7 +75,13 @@ class MockDB:
                 race_id INTEGER PRIMARY KEY,
                 p1_driver_id INTEGER NOT NULL,
                 p2_driver_id INTEGER NOT NULL,
-                p3_driver_id INTEGER NOT NULL
+                p3_driver_id INTEGER NOT NULL,
+                had_safety_car INTEGER,
+                safety_car_count INTEGER,
+                had_virtual_safety_car INTEGER,
+                virtual_safety_car_count INTEGER,
+                data_source TEXT,
+                recorded_at TIMESTAMP
             )
         ''')
         c.execute('''
@@ -315,7 +321,93 @@ class TestRaceManagerStateMachine:
         assert score is not None
         # All 3 correct = 10 + 6 + 4 = 20 points
         assert score['points'] == 20, f"Expected 20 points (all 3 correct), got {score['points']}"
-    
+
+    def test_safety_car_summary_stored_with_results(self, db, monkeypatch):
+        """F1-07: safety-car facts are stored per race when results are ingested."""
+        polling_started = datetime(2026, 6, 15, 15, 30, 0, tzinfo=timezone.utc)
+        now = polling_started + timedelta(minutes=5)
+
+        db.execute('''
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (6, 'Test Grand Prix 6', 15, '2026-06-15 14:00:00', 'locked', 9006))
+        db.execute('''
+            INSERT INTO race_stages (race_id, stage, entered_at, last_poll_at, poll_count)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (6, 'polling', polling_started.strftime('%Y-%m-%dT%H:%M:%SZ'), None, 0))
+        db.commit()
+
+        def mock_fetch_podium(db, session_key, race_id=None, race_date=None):
+            assert session_key == 9006
+            return {
+                'p1': {'driver_id': 1, 'driver_name': 'Max Verstappen'},
+                'p2': {'driver_id': 2, 'driver_name': 'Lando Norris'},
+                'p3': {'driver_id': 3, 'driver_name': 'Charles Leclerc'},
+            }
+
+        def mock_safety_car_summary(session_key, db=None):
+            assert session_key == 9006
+            return {
+                'had_safety_car': True,
+                'safety_car_count': 2,
+                'had_virtual_safety_car': True,
+                'virtual_safety_car_count': 1,
+                'had_any_safety_car': True,
+            }
+
+        monkeypatch.setattr('race_manager._fetch_podium', mock_fetch_podium)
+        monkeypatch.setattr(rm.openf1, 'get_safety_car_summary', mock_safety_car_summary)
+
+        rm.poll_for_results(db, now)
+
+        results = db.execute('SELECT * FROM results WHERE race_id = 6').fetchone()
+        assert results is not None
+        assert results['had_safety_car'] == 1
+        assert results['safety_car_count'] == 2
+        assert results['had_virtual_safety_car'] == 1
+        assert results['virtual_safety_car_count'] == 1
+        assert results['data_source'] == 'openf1'
+        assert results['recorded_at'] is not None
+
+    def test_safety_car_fetch_failure_does_not_block_results(self, db, monkeypatch):
+        """F1-07: an upstream race_control failure must not stop podium/score ingestion."""
+        polling_started = datetime(2026, 6, 15, 15, 30, 0, tzinfo=timezone.utc)
+        now = polling_started + timedelta(minutes=5)
+
+        db.execute('''
+            INSERT INTO races (id, name, round, date, status, session_key)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (7, 'Test Grand Prix 7', 16, '2026-06-15 14:00:00', 'locked', 9007))
+        db.execute('''
+            INSERT INTO race_stages (race_id, stage, entered_at, last_poll_at, poll_count)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (7, 'polling', polling_started.strftime('%Y-%m-%dT%H:%M:%SZ'), None, 0))
+        db.commit()
+
+        def mock_fetch_podium(db, session_key, race_id=None, race_date=None):
+            return {
+                'p1': {'driver_id': 1, 'driver_name': 'Max Verstappen'},
+                'p2': {'driver_id': 2, 'driver_name': 'Lando Norris'},
+                'p3': {'driver_id': 3, 'driver_name': 'Charles Leclerc'},
+            }
+
+        def mock_safety_car_summary_fails(session_key, db=None):
+            raise rm.openf1.OpenF1Error("race_control unavailable")
+
+        monkeypatch.setattr('race_manager._fetch_podium', mock_fetch_podium)
+        monkeypatch.setattr(rm.openf1, 'get_safety_car_summary', mock_safety_car_summary_fails)
+
+        rm.poll_for_results(db, now)
+
+        stage = db.execute('SELECT stage FROM race_stages WHERE race_id = 7').fetchone()
+        assert stage['stage'] == 'completed'
+
+        results = db.execute('SELECT * FROM results WHERE race_id = 7').fetchone()
+        assert results is not None
+        assert results['p1_driver_id'] == 1
+        assert results['had_safety_car'] == 0
+        assert results['safety_car_count'] is None
+
     def test_polling_stays_polling_when_no_results_yet(self, db, monkeypatch):
         """CJ-006 variant: polling stays polling when API has no results yet.
         

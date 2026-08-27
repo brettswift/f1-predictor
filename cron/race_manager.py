@@ -264,19 +264,46 @@ def _calculate_score(pred, res):
     return pts
 
 
-def _save_results_and_score(db, race_id, podium):
+def _fetch_safety_car_summary(db, session_key):
+    """Best-effort safety-car facts for the race (F1-07).
+
+    Failure here must never block podium/score ingestion — an upstream
+    race_control hiccup is not a reason to fail the whole poll.
+    """
+    if session_key is None:
+        return None
+    try:
+        return openf1.get_safety_car_summary(session_key, db=db)
+    except openf1.OpenF1Error as e:
+        logger.warning("Could not fetch safety-car summary for session %s: %s", session_key, e)
+        return None
+
+
+def _save_results_and_score(db, race_id, podium, session_key=None):
     p1 = podium['p1']['driver_id']
     p2 = podium['p2']['driver_id']
     p3 = podium['p3']['driver_id']
+    sc = _fetch_safety_car_summary(db, session_key) or {}
 
     db.execute('''
-        INSERT INTO results (race_id, p1_driver_id, p2_driver_id, p3_driver_id)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO results (race_id, p1_driver_id, p2_driver_id, p3_driver_id,
+                             had_safety_car, safety_car_count,
+                             had_virtual_safety_car, virtual_safety_car_count,
+                             data_source, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'openf1', CURRENT_TIMESTAMP)
         ON CONFLICT(race_id) DO UPDATE SET
             p1_driver_id = excluded.p1_driver_id,
             p2_driver_id = excluded.p2_driver_id,
-            p3_driver_id = excluded.p3_driver_id
-    ''', (race_id, p1, p2, p3))
+            p3_driver_id = excluded.p3_driver_id,
+            had_safety_car = excluded.had_safety_car,
+            safety_car_count = excluded.safety_car_count,
+            had_virtual_safety_car = excluded.had_virtual_safety_car,
+            virtual_safety_car_count = excluded.virtual_safety_car_count,
+            data_source = excluded.data_source,
+            recorded_at = excluded.recorded_at
+    ''', (race_id, p1, p2, p3,
+          1 if sc.get('had_safety_car') else 0, sc.get('safety_car_count'),
+          1 if sc.get('had_virtual_safety_car') else 0, sc.get('virtual_safety_car_count')))
 
     db.execute("UPDATE races SET status = 'completed' WHERE id = ?", (race_id,))
 
@@ -336,7 +363,7 @@ def poll_for_results(db, now):
                 continue
 
         if podium:
-            ok = _save_results_and_score(db, r['race_id'], podium)
+            ok = _save_results_and_score(db, r['race_id'], podium, session_key=session_key)
             if ok:
                 db.execute('''
                     UPDATE race_stages
