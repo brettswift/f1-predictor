@@ -29,6 +29,8 @@ from datetime import datetime, timezone, timedelta
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import openf1
 
+from alerting import record_fetch_attempt, alert_if_needed, FetchOutcome
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -196,6 +198,8 @@ def _fetch_podium(db, session_key):
         podium = openf1.get_podium(session_key, db=db)
     except openf1.OpenF1Error as e:
         logger.error("OpenF1 request failed for session %s: %s", session_key, e)
+        record_fetch_attempt(db, None, 'race_manager', FetchOutcome.API_ERROR, error=str(e))
+        # race_id is unknown here; callers with a race_id will call alert_if_needed
         return None
     if not podium:
         return None
@@ -264,7 +268,7 @@ def _save_results_and_score(db, race_id, podium):
 def poll_for_results(db, now):
     rows = db.execute('''
         SELECT rs.race_id, rs.entered_at, rs.last_poll_at, rs.poll_count,
-               r.name, r.round, r.session_key
+               r.name, r.round, r.date, r.session_key
         FROM race_stages rs
         JOIN races r ON r.id = rs.race_id
         WHERE rs.stage = 'polling'
@@ -287,7 +291,18 @@ def poll_for_results(db, now):
 
         logger.info("poll #%d   %s (round %d)", r['poll_count'] + 1, r['name'], r['round'])
         session_key = _resolve_session_key(db, r['race_id'], r['round'], F1_SEASON, r['session_key'])
-        podium = _fetch_podium(db, session_key) if session_key else None
+        if not session_key:
+            record_fetch_attempt(db, r['race_id'], 'race_manager', FetchOutcome.NO_RESULTS_YET,
+                                 error="session_key unresolved")
+            alert_if_needed(db, r['race_id'], r['date'])
+            db.execute('''
+                UPDATE race_stages SET last_poll_at = ?, poll_count = poll_count + 1
+                WHERE race_id = ?
+            ''', (_now_iso(now), r['race_id']))
+            db.commit()
+            continue
+
+        podium = _fetch_podium(db, session_key)
 
         if podium:
             ok = _save_results_and_score(db, r['race_id'], podium)
@@ -298,7 +313,11 @@ def poll_for_results(db, now):
                     WHERE race_id = ?
                 ''', (_now_iso(now), _now_iso(now), r['race_id']))
                 logger.info("→ completed %s", r['name'])
+                record_fetch_attempt(db, r['race_id'], 'race_manager', FetchOutcome.OK)
+                alert_if_needed(db, r['race_id'], r['date'])
         else:
+            record_fetch_attempt(db, r['race_id'], 'race_manager', FetchOutcome.NO_RESULTS_YET)
+            alert_if_needed(db, r['race_id'], r['date'])
             db.execute('''
                 UPDATE race_stages SET last_poll_at = ?, poll_count = poll_count + 1
                 WHERE race_id = ?

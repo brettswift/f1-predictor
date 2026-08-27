@@ -28,6 +28,12 @@ class MockDB:
         self.conn = sqlite3.connect(':memory:')
         self.conn.row_factory = sqlite3.Row
         self._setup_schema()
+
+    def __getitem__(self, key):
+        # race_manager passes a sqlite3.Row into alert_if_needed via r['date']
+        # when called from poll_for_results.  Tests that call functions
+        # directly use dict-like rows for convenience.
+        raise NotImplementedError("use .conn directly")
     
     def _setup_schema(self):
         c = self.conn.cursor()
@@ -101,6 +107,9 @@ class MockDB:
     def commit(self):
         self.conn.commit()
     
+    def executescript(self, script):
+        return self.conn.executescript(script)
+
     def close(self):
         self.conn.close()
 

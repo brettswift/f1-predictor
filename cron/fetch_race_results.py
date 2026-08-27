@@ -14,6 +14,8 @@ import logging
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import openf1
 
+from alerting import record_fetch_attempt, alert_if_needed, FetchOutcome
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -103,15 +105,23 @@ def fetch_race_results_from_api(db, race, season=None):
     season = season or F1_SEASON
     session_key = _resolve_session_key(db, race, season)
     if not session_key:
+        record_fetch_attempt(db, race['id'], 'fetch_results', FetchOutcome.NO_RESULTS_YET,
+                             error="session_key unresolved")
+        alert_if_needed(db, race['id'], race['date'])
         return None
 
     try:
         podium = openf1.get_podium(session_key, db=db)
     except openf1.OpenF1Error as e:
         logger.error(f"OpenF1 request failed: {e}")
+        record_fetch_attempt(db, race['id'], 'fetch_results', FetchOutcome.API_ERROR,
+                             error=str(e))
+        alert_if_needed(db, race['id'], race['date'])
         return None
     if not podium:
         logger.info(f"Race not complete yet for {race['name']}")
+        record_fetch_attempt(db, race['id'], 'fetch_results', FetchOutcome.NO_RESULTS_YET)
+        alert_if_needed(db, race['id'], race['date'])
         return None
 
     resolved = {}
@@ -121,12 +131,19 @@ def fetch_race_results_from_api(db, race, season=None):
             logger.error(
                 "Race %s: driver #%s (%s) not in drivers table — skipping ingest",
                 race['id'], podium[slot]['driver_number'], podium[slot]['driver_name'])
+            record_fetch_attempt(
+                db, race['id'], 'fetch_results', FetchOutcome.UNRESOLVED_DRIVER,
+                error=f"driver #{podium[slot]['driver_number']} ({podium[slot]['driver_name']}) not in drivers table")
+            alert_if_needed(db, race['id'], race['date'])
             return None
         resolved[slot] = {
             'position': podium[slot]['position'],
             'driver_id': driver_db_id,
             'driver_name': podium[slot]['driver_name'],
         }
+
+    record_fetch_attempt(db, race['id'], 'fetch_results', FetchOutcome.OK)
+    alert_if_needed(db, race['id'], race['date'])
 
     logger.info(f"Fetched podium: P1={resolved['p1']['driver_name']}, "
                f"P2={resolved['p2']['driver_name']}, "
@@ -168,6 +185,7 @@ def update_race_results(race_id, podium):
     """Update database with race results and calculate scores."""
     db = get_db()
     try:
+        from alerting import ensure_alert_tables, _utcnow  # avoid circular import at top
         p1_id = podium['p1']['driver_id']
         p2_id = podium['p2']['driver_id']
         p3_id = podium['p3']['driver_id']
@@ -187,6 +205,21 @@ def update_race_results(race_id, podium):
             "UPDATE races SET status = 'completed' WHERE id = ?",
             (race_id,)
         )
+
+        # Resolve any outstanding fetch-failure alert now that we have results
+        try:
+            ensure_alert_tables(db)
+            active = db.execute(
+                "SELECT id FROM fetch_alerts WHERE race_id = ? AND resolved_at IS NULL ORDER BY alert_sent_at DESC LIMIT 1",
+                (race_id,),
+            ).fetchone()
+            if active:
+                db.execute(
+                    "UPDATE fetch_alerts SET resolved_at = ? WHERE id = ?",
+                    (_utcnow().isoformat(), active[0]),
+                )
+        except Exception as exc:
+            logger.warning("Could not resolve fetch alert for race %s: %s", race_id, exc)
 
         # Calculate scores for all predictions
         predictions = db.execute(
