@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block title %}Leagues - F1 Predictor{% endblock %}
+
+{% block content %}
+<div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px;">
+        <div>
+            <h2>🏆 Your Leagues</h2>
+            <p style="margin-bottom: 0;">Leagues are just a view over the global game.</p>
+        </div>
+        <a href="{{ url_for('new_league') }}" class="btn">Create league</a>
+    </div>
+</div>
+
+{% if leagues %}
+<div class="card">
+    <div class="table-scroll">
+    <table>
+        <thead>
+            <tr>
+                <th>League</th>
+                <th>Window</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for league in leagues %}
+            <tr>
+                <td>
+                    <a href="{{ url_for('league_detail', league_id=league['id']) }}">
+                        {{ league['emoji_or_color'] }} <strong>{{ league['name'] }}</strong>
+                    </a>
+                </td>
+                <td>
+                    {% if league['whole_season'] %}
+                    Whole season
+                    {% else %}
+                    Round {{ league['start_round'] }} forward
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+{% else %}
+<div class="card">
+    <p style="margin-bottom: 0;">You're not in any leagues yet. Create one to get started.</p>
+</div>
+{% endif %}
+{% endblock %}

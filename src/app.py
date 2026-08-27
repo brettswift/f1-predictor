@@ -207,6 +207,37 @@ def init_db():
         )
     ''')
 
+    # Leagues table (F1-20 / BUD-150) - a league is a view over the global
+    # game, scoped to a scoring window. start_round is season-relative
+    # (races.round), NULL when whole_season is set.
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS leagues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            emoji_or_color TEXT NOT NULL,
+            start_round INTEGER,
+            whole_season BOOLEAN DEFAULT 0,
+            admin_user_id TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (admin_user_id) REFERENCES users(session_id)
+        )
+    ''')
+
+    # League membership - the creating admin is inserted here immediately
+    # (BUD-150); BUD-151 adds the invite/join flow on top of this shape.
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS league_members (
+            league_id INTEGER NOT NULL,
+            user_id TEXT NOT NULL,
+            joined_at_round INTEGER,
+            is_admin BOOLEAN DEFAULT 0,
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (league_id, user_id),
+            FOREIGN KEY (league_id) REFERENCES leagues(id),
+            FOREIGN KEY (user_id) REFERENCES users(session_id)
+        )
+    ''')
+
     # Predictions table
     db.execute('''
         CREATE TABLE IF NOT EXISTS predictions (
@@ -1192,6 +1223,90 @@ def get_next_open_race(db):
             return r
     return None
 
+
+def _current_or_next_round(db):
+    """Resolve "current round forward" for a new league's default scoring window.
+
+    Prefers the next open race (same logic as get_next_open_race). If none is
+    open (e.g. a race is locked/in-progress with nothing else open yet), fall
+    back to the next non-completed race so a league created mid-weekend still
+    starts at a sensible round rather than silently reverting to null/whole
+    season.
+    """
+    races = get_races_with_computed_status(db)
+    for r in races:
+        if r['status'] == 'open':
+            return r['round']
+    for r in races:
+        if r['status'] != 'completed':
+            return r['round']
+    return races[-1]['round'] if races else None
+
+
+def create_league(db, admin_user_id, name, emoji_or_color, whole_season=False, start_round=None):
+    """Create a league and immediately seat the creator as its admin member.
+
+    No predictions/scores rows are touched here - a league is purely a view
+    over the existing global game (E3).
+    """
+    name = (name or '').strip()
+    emoji_or_color = (emoji_or_color or '').strip()
+    if not name:
+        raise ValueError('League name is required')
+    if not emoji_or_color:
+        raise ValueError('Emoji or color is required')
+
+    current_round = _current_or_next_round(db)
+
+    if whole_season:
+        resolved_start_round = None
+    elif start_round is not None:
+        resolved_start_round = start_round
+    else:
+        resolved_start_round = current_round
+
+    cur = db.execute(
+        '''INSERT INTO leagues (name, emoji_or_color, start_round, whole_season, admin_user_id)
+           VALUES (?, ?, ?, ?, ?)''',
+        (name, emoji_or_color, resolved_start_round, 1 if whole_season else 0, admin_user_id)
+    )
+    league_id = cur.lastrowid
+
+    db.execute(
+        '''INSERT INTO league_members (league_id, user_id, joined_at_round, is_admin)
+           VALUES (?, ?, ?, 1)''',
+        (league_id, admin_user_id, current_round)
+    )
+    db.commit()
+    return league_id
+
+
+def is_league_member(db, league_id, user_id):
+    """Membership lookup - true immediately for the creating admin, no separate invite needed."""
+    row = db.execute(
+        'SELECT 1 FROM league_members WHERE league_id = ? AND user_id = ?',
+        (league_id, user_id)
+    ).fetchone()
+    return row is not None
+
+
+def get_league_members(db, league_id):
+    return db.execute(
+        'SELECT * FROM league_members WHERE league_id = ? ORDER BY joined_at',
+        (league_id,)
+    ).fetchall()
+
+
+def get_user_leagues(db, user_id):
+    """Leagues a user belongs to, most recently created first."""
+    return db.execute(
+        '''SELECT l.* FROM leagues l
+           JOIN league_members lm ON lm.league_id = l.id
+           WHERE lm.user_id = ?
+           ORDER BY l.created_at DESC''',
+        (user_id,)
+    ).fetchall()
+
 # --- Routes ---
 
 @app.route('/')
@@ -1527,6 +1642,73 @@ def live():
                           current_user=user,
                           season=season,
                           refresh_interval=60)
+
+@app.route('/leagues')
+def leagues():
+    """List the current user's leagues."""
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+
+    db = get_db()
+    user_leagues = get_user_leagues(db, user['session_id'])
+    return render_template('leagues.html', leagues=user_leagues)
+
+
+@app.route('/leagues/new', methods=['GET'])
+def new_league():
+    """Show the create-league form."""
+    user = get_current_user()
+    if not user:
+        flash('Please sign in to create a league', 'error')
+        return redirect(url_for('index'))
+    return render_template('league_new.html')
+
+
+@app.route('/leagues', methods=['POST'])
+def create_league_route():
+    """Create a league (name + emoji/color required; scoring window optional)."""
+    user = get_current_user()
+    if not user:
+        flash('Please sign in to create a league', 'error')
+        return redirect(url_for('index'))
+
+    name = request.form.get('name', '').strip()
+    emoji_or_color = request.form.get('emoji_or_color', '').strip()
+    window = request.form.get('window', 'current')  # 'current' (default) | 'whole_season'
+
+    if not name or not emoji_or_color:
+        flash('League name and emoji/color are required', 'error')
+        return redirect(url_for('new_league'))
+
+    db = get_db()
+    league_id = create_league(
+        db, user['session_id'], name, emoji_or_color,
+        whole_season=(window == 'whole_season'),
+    )
+    flash('League created!', 'success')
+    return redirect(url_for('league_detail', league_id=league_id))
+
+
+@app.route('/leagues/<int:league_id>')
+def league_detail(league_id):
+    """League detail: name, emoji/color, scoring window, members."""
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+
+    db = get_db()
+    league = db.execute('SELECT * FROM leagues WHERE id = ?', (league_id,)).fetchone()
+    if not league:
+        flash('League not found', 'error')
+        return redirect(url_for('leagues'))
+
+    members = get_league_members(db, league_id)
+    return render_template('league_detail.html',
+                          league=league,
+                          members=members,
+                          is_member=is_league_member(db, league_id, user['session_id']))
+
 
 @app.route('/races')
 def races():
