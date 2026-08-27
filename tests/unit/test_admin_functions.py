@@ -321,6 +321,83 @@ class TestAdminEnterResults:
         assert results['p2_driver_id'] == p2_new, "P2 should be updated"
         assert results['p3_driver_id'] == p3_new, "P3 should be updated"
 
+    def test_bud_128_correction_triggers_rescore(self, app, client):
+        """BUD-128 AC: Corrections trigger automatic re-score.
+
+        Given a race already has results and a user has a score from them
+        When admin corrects the results to a different podium
+        Then the user's score should be recalculated to match the new result
+        (not left stale from the original entry).
+        """
+        from app import get_db
+        db = get_db()
+        race = self._insert_race_and_drivers(db, round_num=404, status='locked')
+        d = race['drivers']
+
+        # Predictor picked d[0], d[1], d[2] in order.
+        self._insert_user_and_prediction(db, 'predictor2', race['id'], d[0]['id'], d[1]['id'], d[2]['id'])
+
+        self._login(client, 'brett')
+
+        # First entry: matches the prediction exactly -> 20 points.
+        response = client.post(f'/admin/enter-results/{race["id"]}',
+                               data={'p1': d[0]['id'], 'p2': d[1]['id'], 'p3': d[2]['id']},
+                               follow_redirects=True)
+        assert response.status_code == 200
+
+        user_session = db.execute('SELECT session_id FROM users WHERE username = ?', ('predictor2',)).fetchone()
+        score_before = db.execute('SELECT points FROM scores WHERE user_id = ? AND race_id = ?',
+                                  (user_session['session_id'], race['id'])).fetchone()
+        assert score_before['points'] == 20, "Initial entry should score a perfect prediction as 20"
+
+        # Admin corrects the results to a podium that shares no drivers with the
+        # prediction -> re-score must drop to 0, proving the correction actually
+        # recalculates scores rather than leaving the stale value in place.
+        response = client.post(f'/admin/enter-results/{race["id"]}',
+                               data={'p1': d[3]['id'], 'p2': d[4]['id'], 'p3': d[3]['id']},
+                               follow_redirects=True)
+        assert response.status_code == 200
+
+        score_after = db.execute('SELECT points FROM scores WHERE user_id = ? AND race_id = ?',
+                                 (user_session['session_id'], race['id'])).fetchone()
+        assert score_after['points'] == 0, \
+            f"Correction should re-score the prediction to 0, got {score_after['points']}"
+
+    def test_bud_128_enter_results_works_when_openf1_down(self, app, client, monkeypatch):
+        """BUD-128 AC: Results can be fully entered/corrected by hand when OpenF1 is down.
+
+        Given the OpenF1 client raises on every call (simulating an outage)
+        When admin enters results via POST /admin/enter-results/<id>
+        Then the manual entry should still succeed — the admin path must not
+        depend on the F1 API being reachable.
+        """
+        import openf1
+
+        def _boom(*args, **kwargs):
+            raise openf1.OpenF1Error("OpenF1 is down")
+
+        monkeypatch.setattr(openf1, 'get_race_sessions', _boom)
+        monkeypatch.setattr(openf1, 'get_podium', _boom)
+        monkeypatch.setattr(openf1, 'get_safety_car_summary', _boom)
+
+        from app import get_db
+        db = get_db()
+        race = self._insert_race_and_drivers(db, round_num=405, status='locked')
+        d = race['drivers']
+
+        self._login(client, 'brett')
+
+        response = client.post(f'/admin/enter-results/{race["id"]}',
+                               data={'p1': d[0]['id'], 'p2': d[1]['id'], 'p3': d[2]['id']},
+                               follow_redirects=True)
+
+        assert response.status_code == 200, \
+            "Manual results entry must succeed even when OpenF1 calls raise"
+
+        results = db.execute('SELECT * FROM results WHERE race_id = ?', (race['id'],)).fetchone()
+        assert results is not None, "Results should be saved when OpenF1 is down"
+        assert results['p1_driver_id'] == d[0]['id']
+
 
 class TestAdminDeletePredictions:
     """Test admin prediction deletion functionality (ADM-003)."""
