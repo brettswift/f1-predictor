@@ -14,7 +14,12 @@
         <input type="text" name="username" placeholder="Enter your name" required autofocus>
         <button type="submit" class="btn" style="width: 100%;">Start Predicting</button>
     </form>
-    
+
+    <p style="margin-top: 20px; opacity: 0.6; font-size: 14px;">
+        Want to save your progress across devices?
+        <a href="{{ url_for('login') }}" style="color: #fff; text-decoration: underline;">Log in with email</a>
+    </p>
+
     <p style="margin-top: 30px; opacity: 0.6; font-size: 14px;">
         Powered by your predictions. Race on! 🏁
     </p>
