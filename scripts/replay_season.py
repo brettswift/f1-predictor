@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Season replay harness for F1-110.
+"""Season replay harness for F1-110 / F1-111 / F1-112.
 
 Populates the leaderboard with deterministic synthetic users, predictions, and
 scores by calling the production calculate_score() path. Synthetic data is
 tagged via users.is_synthetic (F1-111) so it can be torn down cleanly.
+Personas (F1-112) change how each synthetic user picks P1/P2/P3.
 
 Usage:
     python3 -m scripts.replay_season --season 2026 --seed 42
+    python3 -m scripts.replay_season --season 2026 --seed 42 --mixed-personas
+    python3 -m scripts.replay_season --season 2026 --seed 42 --persona front_runner
     python3 -m scripts.replay_season --teardown --yes
 """
 
@@ -62,21 +65,34 @@ def _synthetic_uuid(season: int, seed: int, index: int) -> str:
 
 
 def _create_synthetic_users(
-    db: sqlite3.Connection, season: int, seed: int, count: int
-) -> list[tuple[str, str]]:
+    db: sqlite3.Connection,
+    season: int,
+    seed: int,
+    count: int,
+    personas: list[str] | None = None,
+) -> list[tuple[str, str, str]]:
     """Create deterministic synthetic users.
 
-    Returns a list of (session_id, username) tuples in creation order.
+    Returns a list of (session_id, username, persona) tuples in creation order.
     """
-    users: list[tuple[str, str]] = []
+    from personas import assign_personas
+
+    personas = personas or assign_personas(count)
+    if len(personas) != count:
+        raise ReplayError(
+            f"Persona list length ({len(personas)}) must match user count ({count})"
+        )
+
+    users: list[tuple[str, str, str]] = []
     for i in range(count):
         username = f"synthetic_{seed}_{i + 1:03d}"
         session_id = _synthetic_uuid(season, seed, i)
+        persona = personas[i]
         db.execute(
-            "INSERT OR IGNORE INTO users (session_id, username, is_synthetic) VALUES (?, ?, 1)",
-            (session_id, username),
+            "INSERT OR IGNORE INTO users (session_id, username, is_synthetic, persona) VALUES (?, ?, 1, ?)",
+            (session_id, username, persona),
         )
-        users.append((session_id, username))
+        users.append((session_id, username, persona))
     db.commit()
     return users
 
@@ -121,8 +137,26 @@ def _scored_races(db: sqlite3.Connection, season: int) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def _all_drivers(db: sqlite3.Connection) -> list[dict]:
+    """Return all drivers as dicts suitable for persona strategies."""
+    return [
+        {
+            "id": row["id"],
+            "driver_id": row["driver_id"],
+            "name": row["name"],
+            "team": row["team"],
+            "number": row["number"],
+            "code": row["code"],
+            "nationality": row["nationality"],
+        }
+        for row in db.execute(
+            "SELECT id, driver_id, name, team, number, code, nationality FROM drivers ORDER BY id"
+        ).fetchall()
+    ]
+
+
 def _all_driver_ids(db: sqlite3.Connection) -> list[int]:
-    return [row["id"] for row in db.execute("SELECT id FROM drivers ORDER BY id").fetchall()]
+    return [d["id"] for d in _all_drivers(db)]
 
 
 def _generate_prediction(driver_ids: list[int], rng: random.Random) -> tuple[int, int, int]:
@@ -133,22 +167,39 @@ def _generate_prediction(driver_ids: list[int], rng: random.Random) -> tuple[int
 
 def _ensure_predictions(
     db: sqlite3.Connection,
-    users: list[tuple[str, str]],
+    users: list[tuple[str, str, str]],
     races: list[sqlite3.Row],
     driver_ids: list[int],
     seed: int,
+    use_personas: bool = False,
 ) -> None:
     """Generate deterministic synthetic predictions through the live schema."""
+    from personas import RaceContext, generate_persona_prediction
+
+    if use_personas:
+        drivers = _all_drivers(db)
+
     rng = random.Random(seed)
     for race in races:
-        for user_id, _username in users:
+        if use_personas:
+            context = RaceContext(
+                race_id=race["id"],
+                race_name=race["name"],
+                round=race["round"],
+                date=race["date"],
+                drivers=tuple(drivers),
+            )
+        for user_id, _username, persona in users:
             existing = db.execute(
                 "SELECT 1 FROM predictions WHERE user_id = ? AND race_id = ?",
                 (user_id, race["id"]),
             ).fetchone()
             if existing:
                 continue
-            p1, p2, p3 = _generate_prediction(driver_ids, rng)
+            if use_personas:
+                p1, p2, p3 = generate_persona_prediction(seed, user_id, persona, context)
+            else:
+                p1, p2, p3 = _generate_prediction(driver_ids, rng)
             db.execute(
                 """
                 INSERT INTO predictions (user_id, race_id, p1_driver_id, p2_driver_id, p3_driver_id)
@@ -160,7 +211,7 @@ def _ensure_predictions(
 
 
 def _calculate_and_insert_scores(
-    db: sqlite3.Connection, users: list[tuple[str, str]], races: list[sqlite3.Row]
+    db: sqlite3.Connection, users: list[tuple[str, str, str]], races: list[sqlite3.Row]
 ) -> None:
     """Score every synthetic prediction using app.calculate_score()."""
     for race in races:
@@ -169,7 +220,7 @@ def _calculate_and_insert_scores(
             "p2_driver_id": race["p2_driver_id"],
             "p3_driver_id": race["p3_driver_id"],
         }
-        for user_id, _username in users:
+        for user_id, _username, _persona in users:
             pred = db.execute(
                 """
                 SELECT p1_driver_id, p2_driver_id, p3_driver_id
@@ -250,12 +301,26 @@ def run_replay(
     seed: int,
     db: sqlite3.Connection | None = None,
     user_count: int = DEFAULT_SYNTHETIC_USER_COUNT,
+    persona_slug: str | None = None,
+    mixed_personas: bool = False,
 ) -> dict:
     """Run the full replay and return result metadata.
 
     If ``db`` is provided it is used directly and left open; otherwise a new
     connection is opened and closed.
+
+    Persona options:
+      * ``persona_slug`` assigns every synthetic user the same persona.
+      * ``mixed_personas`` cycles through all seven archetypes.
+      * If neither is set, the legacy random-picker strategy is used and the
+        deterministic seed behaviour from BUD-132 is preserved exactly.
     """
+    from personas import assign_personas, list_persona_slugs
+
+    use_personas = bool(persona_slug or mixed_personas)
+    if persona_slug and persona_slug not in list_persona_slugs():
+        raise ReplayError(f"Unknown persona '{persona_slug}'. Valid: {list_persona_slugs()}")
+
     close_db = db is None
     db = db or _connect()
 
@@ -273,8 +338,12 @@ def run_replay(
                 f"found {len(races)}"
             )
 
-        users = _create_synthetic_users(db, season, seed, user_count)
-        _ensure_predictions(db, users, races, driver_ids, seed)
+        personas = None
+        if use_personas:
+            personas = assign_personas(user_count, mixed=mixed_personas, persona_slug=persona_slug)
+
+        users = _create_synthetic_users(db, season, seed, user_count, personas=personas)
+        _ensure_predictions(db, users, races, driver_ids, seed, use_personas=use_personas)
         _calculate_and_insert_scores(db, users, races)
         counts_after = _snapshot_counts(db)
         leaderboard = _leaderboard(db, season, (u[0] for u in users))
@@ -320,6 +389,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--teardown", action="store_true")
     parser.add_argument("--db", type=str, default=None, help="Database path override")
     parser.add_argument("--yes", action="store_true", help="Skip confirmation prompts")
+    parser.add_argument(
+        "--persona",
+        type=str,
+        default=None,
+        help="Assign every synthetic user this persona (see src/personas.py)",
+    )
+    parser.add_argument(
+        "--mixed-personas",
+        action="store_true",
+        help="Cycle through all persona archetypes across synthetic users",
+    )
     args = parser.parse_args(argv)
 
     if args.db:
@@ -346,7 +426,16 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --seed is required for replay", file=sys.stderr)
         return 1
 
-    result = run_replay(args.season, args.seed)
+    if args.persona and args.mixed_personas:
+        print("error: --persona and --mixed-personas are mutually exclusive", file=sys.stderr)
+        return 1
+
+    result = run_replay(
+        args.season,
+        args.seed,
+        persona_slug=args.persona,
+        mixed_personas=args.mixed_personas,
+    )
     print(_format_leaderboard(result["leaderboard"]))
     return 0
 

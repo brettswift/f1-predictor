@@ -126,6 +126,7 @@ def init_db():
             session_id TEXT PRIMARY KEY,
             username TEXT NOT NULL UNIQUE,
             is_synthetic INTEGER DEFAULT 0,
+            persona TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -265,6 +266,9 @@ def _apply_migrations(db):
     if 'is_synthetic' not in users:
         db.execute('ALTER TABLE users ADD COLUMN is_synthetic INTEGER DEFAULT 0')
         app.logger.info('Migration: users.is_synthetic added')
+    if 'persona' not in users:
+        db.execute('ALTER TABLE users ADD COLUMN persona TEXT')
+        app.logger.info('Migration: users.persona added')
 
 # --- API fetching ---
 
