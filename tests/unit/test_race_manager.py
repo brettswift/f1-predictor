@@ -350,3 +350,23 @@ class TestRaceManagerStateMachine:
         stage = db.execute('SELECT stage, poll_count FROM race_stages WHERE race_id = 6').fetchone()
         assert stage['stage'] == 'polling', f"Expected 'polling', got '{stage['stage']}'"
         assert stage['poll_count'] == 1, f"Expected poll_count=1, got {stage['poll_count']}"
+
+
+class TestScoreUpdateTimingBudget:
+    """BUD-127 (F1-05): pin the timing constants that back the "scores +
+    leaderboard correct within 30 minutes of official results" AC, so a
+    future tweak to these constants can't silently blow the budget.
+    """
+
+    def test_poll_interval_within_30_minute_budget(self):
+        """Once polling starts, results must be checked at least every 30 min."""
+        assert rm.POLL_INTERVAL <= timedelta(minutes=30), (
+            f"POLL_INTERVAL={rm.POLL_INTERVAL} exceeds the 30-min AC budget"
+        )
+
+    def test_poll_delay_does_not_undercut_typical_race_duration(self):
+        """POLL_DELAY should not be so short that we hammer the API before a
+        race has plausibly finished (races run ~1h-2h from lights out)."""
+        assert timedelta(hours=1) <= rm.POLL_DELAY <= timedelta(hours=3), (
+            f"POLL_DELAY={rm.POLL_DELAY} is outside the plausible race-duration window"
+        )
