@@ -327,6 +327,7 @@
                 {% if environment == 'dev' %}
                 <a href="/admin" target="_blank">Admin</a>
                 {% endif %}
+                <a href="{{ url_for('profile') }}">Profile</a>
                 <a href="{{ url_for('logout') }}">Logout</a>
             </nav>
         </div>
