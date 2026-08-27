@@ -954,7 +954,7 @@ def set_username():
         # Create new user with new session_id
         session_id = str(uuid.uuid4())
         db.execute(
-            'INSERT INTO users (session_id, username) VALUES (?, ?)',
+            'INSERT INTO users (session_id, username, is_synthetic) VALUES (?, ?, 0)',
             (session_id, username)
         )
         db.commit()
@@ -1105,11 +1105,13 @@ def leaderboard():
     race_filter_args = (str(filter_year),)
 
     # Get users with scores filtered by season
+    # F1-111: exclude synthetic replay/persona users from public leaderboards.
     users = db.execute(f'''
         SELECT u.*, COALESCE(SUM(s.points), 0) as total_score
         FROM users u
         LEFT JOIN scores s ON u.session_id = s.user_id
         LEFT JOIN races r ON s.race_id = r.id
+        WHERE u.is_synthetic = 0
         GROUP BY u.session_id
         HAVING COUNT(CASE WHEN r.id IS NOT NULL THEN 1 END) = 0
            OR SUM(CASE WHEN strftime('%Y', r.date) = ? THEN s.points ELSE 0 END) >= 0
@@ -1122,6 +1124,7 @@ def leaderboard():
         FROM users u
         LEFT JOIN scores s ON u.session_id = s.user_id
         LEFT JOIN races r ON s.race_id = r.id AND strftime('%Y', r.date) = ?
+        WHERE u.is_synthetic = 0
         GROUP BY u.session_id
         ORDER BY total_score DESC
     ''', (str(filter_year),)).fetchall()
@@ -1222,12 +1225,14 @@ def live():
             user_points_per_race[race['id']] = score['points'] if score else 0
 
     # Calculate aggregate leaderboard
+    # F1-111: exclude synthetic replay/persona users from live leaderboards.
     leaderboard = db.execute('''
         SELECT u.session_id, u.username,
                COALESCE(SUM(s.points), 0) as total_score
         FROM users u
         LEFT JOIN scores s ON u.session_id = s.user_id
         LEFT JOIN races r ON s.race_id = r.id AND strftime('%Y', r.date) = ?
+        WHERE u.is_synthetic = 0
         GROUP BY u.session_id
         ORDER BY total_score DESC
     ''', (str(season),)).fetchall()
@@ -1320,7 +1325,7 @@ def _race_detail_impl(race_id, db, user):
         JOIN drivers d1 ON p.p1_driver_id = d1.id
         JOIN drivers d2 ON p.p2_driver_id = d2.id
         JOIN drivers d3 ON p.p3_driver_id = d3.id
-        WHERE p.race_id = ?
+        WHERE p.race_id = ? AND u.is_synthetic = 0
         ORDER BY u.username
     ''', (race_id,)).fetchall()
 
@@ -1455,6 +1460,7 @@ def live_leaderboard(race_id):
     data_age_label = getattr(live_positions, 'age_label', None)
     
     # Get all predictions for this race with projected points
+    # F1-111: exclude synthetic replay/persona users from live race leaderboards.
     predictions = db.execute('''
         SELECT p.*, u.username,
                d1.name as p1_name, d1.driver_id as p1_api_id,
@@ -1465,7 +1471,7 @@ def live_leaderboard(race_id):
         JOIN drivers d1 ON p.p1_driver_id = d1.id
         JOIN drivers d2 ON p.p2_driver_id = d2.id
         JOIN drivers d3 ON p.p3_driver_id = d3.id
-        WHERE p.race_id = ?
+        WHERE p.race_id = ? AND u.is_synthetic = 0
         ORDER BY u.username
     ''', (race_id,)).fetchall()
     
