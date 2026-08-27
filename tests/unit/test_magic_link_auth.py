@@ -198,6 +198,49 @@ class TestMagicLinkLogin:
         assert pred is not None
         assert pred['p1_driver_id'] == 9000
 
+    def test_re_request_invalidates_prior_unused_token(self, app, client):
+        """AC: Re-requesting a link for the same email invalidates prior unused token."""
+        from app import get_db
+
+        # First request
+        client.post('/login/request', data={'email': 'reissue@example.com'})
+        db = get_db()
+        first = db.execute(
+            'SELECT * FROM login_tokens WHERE email = ? ORDER BY created_at DESC',
+            ('reissue@example.com',)
+        ).fetchall()[-1]
+
+        # Second request invalidates the first
+        client.post('/login/request', data={'email': 'reissue@example.com'})
+        first_now = db.execute(
+            'SELECT used FROM login_tokens WHERE id = ?', (first['id'],)
+        ).fetchone()
+        assert first_now['used'] == 1
+
+        # First token should no longer log in
+        response = client.get(f'/login/verify/{first["token"]}', follow_redirects=False)
+        assert response.status_code == 302
+        assert response.location == '/login'
+
+    def test_session_cookie_is_permanent(self, app, client):
+        """AC: Session cookie is set with max-age so it survives browser restart."""
+        from app import get_db
+
+        client.post('/login/request', data={'email': 'permanent@example.com'})
+        db = get_db()
+        row = db.execute(
+            'SELECT * FROM login_tokens WHERE email = ?', ('permanent@example.com',)
+        ).fetchone()
+
+        response = client.get(f'/login/verify/{row["token"]}', follow_redirects=False)
+        assert response.status_code == 302
+
+        # Flask test client exposes set_cookie headers via response.headers
+        set_cookie = response.headers.get('Set-Cookie', '')
+        assert 'session=' in set_cookie
+        # A persistent session emits Max-Age/Expires
+        assert 'Max-Age=' in set_cookie or 'Expires=' in set_cookie
+
     def test_debug_endpoint_hidden_in_non_dev(self, app, client, monkeypatch):
         """The debug magic-link endpoint is not exposed outside dev/test."""
         monkeypatch.setitem(app.config, 'ENVIRONMENT', 'production')

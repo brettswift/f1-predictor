@@ -23,6 +23,7 @@ import fetch_attempts
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
 app.config['DATABASE'] = os.environ.get('DATABASE_PATH', '/data/f1_predictions.db')
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 
 # Environment configuration
 app.config['ENVIRONMENT'] = os.environ.get('ENVIRONMENT', 'dev')
@@ -901,6 +902,11 @@ def create_login_token(email):
     token = _generate_login_token()
     expires_at = _now_utc() + timedelta(minutes=LOGIN_TOKEN_TTL_MINUTES)
 
+    # Invalidate any prior unused token for this email before creating a new one.
+    db.execute(
+        'UPDATE login_tokens SET used = 1 WHERE email = ? AND used = 0',
+        (normalized,)
+    )
     db.execute('''
         INSERT INTO login_tokens (email, token, expires_at)
         VALUES (?, ?, ?)
@@ -996,6 +1002,7 @@ def bind_email_to_session(email):
             attempt += 1
 
     session['session_id'] = new_session_id
+    session.permanent = True
     return new_session_id
 
 
@@ -1102,6 +1109,7 @@ def set_username():
         db.commit()
 
     session['session_id'] = session_id
+    session.permanent = True
     return redirect(url_for('home'))
 
 @app.route('/home')
