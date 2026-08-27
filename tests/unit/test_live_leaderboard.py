@@ -352,6 +352,95 @@ class TestGracefulFallback:
             app_module.fetch_live_race_data = original_fetch
 
 
+class TestDataAgeIndicator:
+    """F1-02: upstream failure serves cache with a visible data-age indicator."""
+
+    def _setup_race(self, db, race_id):
+        session_id = f'test-user-{race_id}'
+        db.execute('INSERT INTO users (session_id, username) VALUES (?, ?)',
+                   (session_id, f'testuser{race_id}'))
+        db.execute('INSERT INTO races (id, name, round, date, status) VALUES (?, ?, ?, ?, ?)',
+                   (race_id, f'Test GP {race_id}', race_id, '2026-04-04 14:00:00', 'locked'))
+        for offset, (name, team, number, code, nat) in enumerate((
+            ('Max Verstappen', 'Red Bull', 1, 'VER', 'Dutch'),
+            ('Lewis Hamilton', 'Ferrari', 44, 'HAM', 'British'),
+            ('Lando Norris', 'McLaren', 4, 'NOR', 'British'),
+        ), start=1):
+            db.execute(
+                'INSERT INTO drivers (id, driver_id, name, team, number, code, nationality) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (race_id * 10 + offset, f'{code.lower()}{race_id}', name, team, number, code, nat))
+        db.commit()
+        return session_id
+
+    def test_cached_positions_show_data_age_indicator(self, app, client, monkeypatch):
+        """When OpenF1 is down and the last-known-good cache is served, the
+        page must say so and show the cache's age — never present it as live."""
+        from app import get_db, LivePositions
+        db = get_db()
+
+        race_id = 802
+        session_id = self._setup_race(db, race_id)
+
+        stale_positions = LivePositions(
+            [{'position': 1, 'driver_id': 'ver', 'driver_number': 1, 'name': 'Max Verstappen',
+              'code': 'VER', 'constructor': 'Red Bull', 'nationality': 'Dutch', 'grid': '',
+              'laps': 42, 'status': 'Finished', 'points': 25, 'fastest_lap': ''}],
+            from_cache=True,
+            is_stale=True,
+            age_label='2h ago',
+            fetched_at=datetime(2026, 4, 4, 12, 0, 0, tzinfo=timezone.utc),
+        )
+
+        import app as app_module
+        original_fetch = app_module.fetch_live_race_data
+        app_module.fetch_live_race_data = lambda s, r: stale_positions
+
+        with client.session_transaction() as sess:
+            sess['session_id'] = session_id
+
+        try:
+            response = client.get(f'/race/{race_id}/live')
+            assert response.status_code == 200
+            content = response.data.decode('utf-8')
+            assert 'cached' in content.lower(), \
+                "Cached fallback data must be labeled as such, not shown as live"
+            assert '2h ago' in content, \
+                "Data-age indicator must surface the cache's actual age"
+        finally:
+            app_module.fetch_live_race_data = original_fetch
+
+    def test_fresh_positions_do_not_show_cache_banner(self, app, client, monkeypatch):
+        """A genuinely live read must not be mislabeled as cached."""
+        from app import get_db, LivePositions
+        db = get_db()
+
+        race_id = 803
+        session_id = self._setup_race(db, race_id)
+
+        fresh_positions = LivePositions(
+            [{'position': 1, 'driver_id': 'ver', 'driver_number': 1, 'name': 'Max Verstappen',
+              'code': 'VER', 'constructor': 'Red Bull', 'nationality': 'Dutch', 'grid': '',
+              'laps': 42, 'status': 'Finished', 'points': 25, 'fastest_lap': ''}],
+            from_cache=False,
+        )
+
+        import app as app_module
+        original_fetch = app_module.fetch_live_race_data
+        app_module.fetch_live_race_data = lambda s, r: fresh_positions
+
+        with client.session_transaction() as sess:
+            sess['session_id'] = session_id
+
+        try:
+            response = client.get(f'/race/{race_id}/live')
+            assert response.status_code == 200
+            content = response.data.decode('utf-8')
+            assert 'showing cached data' not in content.lower()
+        finally:
+            app_module.fetch_live_race_data = original_fetch
+
+
 class TestAutoRefresh:
     """Test cases for LL-002: Auto-refresh every 30 seconds."""
 
