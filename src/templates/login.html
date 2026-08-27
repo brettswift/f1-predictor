@@ -15,6 +15,12 @@
         <button type="submit" class="btn" style="width: 100%;">Send Magic Link</button>
     </form>
 
+    <div style="margin-top: 20px;">
+        <a href="{{ url_for('login_oauth_google') }}" class="btn" style="background: #4285F4; width: 100%; max-width: 400px;">
+            Sign in with Google
+        </a>
+    </div>
+
     <p style="margin-top: 30px; opacity: 0.6; font-size: 14px;">
         Prefer to stay anonymous? <a href="{{ url_for('index') }}" style="color: #fff; text-decoration: underline;">Enter a username instead</a>.
     </p>
