@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block title %}Legacy Users - F1 Predictor{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>Legacy Users</h2>
+    <p style="opacity: 0.8;">
+        These users signed up before email login was available and have not added an email yet.
+    </p>
+</div>
+
+<div class="card">
+    <h3>Send migration link</h3>
+    <form method="POST" action="{{ url_for('admin_legacy_users') }}" style="margin-bottom: 25px;">
+        <label style="display: block; margin-bottom: 8px; font-weight: 500;">
+            Email address
+        </label>
+        <input type="email" name="email" placeholder="user@example.com" required>
+        <small style="display: block; margin: 8px 0 15px; opacity: 0.7;">
+            Creates a magic link for this email. The link is logged for manual delivery.
+        </small>
+        <button type="submit" class="btn">Create migration link</button>
+    </form>
+</div>
+
+<div class="card">
+    <h3>Pending legacy users ({{ users|length }})</h3>
+    {% if users %}
+    <div class="table-scroll">
+        <table>
+            <thead>
+                <tr>
+                    <th>Username</th>
+                    <th>Session ID</th>
+                    <th>Created</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for user in users %}
+                <tr>
+                    <td>{{ user['username'] }}</td>
+                    <td><code>{{ user['session_id'] }}</code></td>
+                    <td>{{ user['created_at'] }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p>No legacy users pending migration. 🎉</p>
+    {% endif %}
+</div>
+{% endblock %}
