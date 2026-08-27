@@ -1,125 +1,17 @@
-"""Unit tests for CronJob deployment (F1-CJ-4: Test CronJob deployment)."""
+"""Unit tests for CronJob deployment (F1-CJ-4: Test CronJob deployment).
+
+BUD-127 (F1-05): the standalone hourly `f1-fetch-results` and per-minute
+`f1-lock-races` CronJobs were superseded by the `f1-race-manager` state
+machine (see base/race-manager-cronjob.yaml) and their manifests were
+removed — they were never wired into base/kustomization.yaml, so they were
+dead config that could mislead someone into thinking two extra jobs were
+deployed. `TestKustomizationWiring` below guards against the pipeline
+silently dropping out of the deployed manifest set again.
+"""
 
 import pytest
 import os
 import yaml
-
-
-class TestFetchResultsCronJob:
-    """Test cases for fetch-results CronJob (CJ-012, CJ-013)."""
-
-    @pytest.fixture
-    def cronjob_spec(self):
-        """Load the fetch-results CronJob YAML."""
-        yaml_path = os.path.join(
-            os.path.dirname(__file__), '..', '..', 'base', 'fetch-results-cronjob.yaml'
-        )
-        with open(yaml_path) as f:
-            return yaml.safe_load(f)
-
-    def test_cj_012_fetch_results_cronjob_exists(self, cronjob_spec):
-        """CJ-012: Hourly cron runs fetch_race_results.py.
-        
-        Given the fetch-results CronJob YAML exists
-        When parsed
-        Then it should be a valid CronJob resource
-        """
-        assert cronjob_spec['kind'] == 'CronJob', "Should be a CronJob resource"
-        assert cronjob_spec['apiVersion'] == 'batch/v1', "Should use batch/v1 API"
-
-    def test_cj_012_hourly_schedule_configured(self, cronjob_spec):
-        """CJ-012: Hourly cron schedule configured.
-        
-        Given the CronJob is defined
-        When checked
-        Then schedule should run hourly (at minute 5)
-        """
-        schedule = cronjob_spec['spec']['schedule']
-        assert schedule == "5 * * * *", f"Expected hourly schedule '5 * * * *', got {schedule}"
-
-    def test_cj_012_fetch_script_command(self, cronjob_spec):
-        """CJ-012: CronJob runs fetch_race_results.py.
-        
-        Given the CronJob container is defined
-        When checked
-        Then command should run fetch_race_results.py
-        """
-        containers = cronjob_spec['spec']['jobTemplate']['spec']['template']['spec']['containers']
-        assert len(containers) == 1
-        container = containers[0]
-        
-        command_str = ' '.join(container['command'])
-        assert 'python3' in command_str, "Should run python3"
-        assert 'fetch_race_results.py' in command_str, "Should run fetch_race_results.py"
-
-    def test_cj_013_pvc_mounted_at_data(self, cronjob_spec):
-        """CJ-013: PVC mounted at /data.
-        
-        Given the CronJob is defined
-        When checked
-        Then volumeMounts should have /data mounted from PVC
-        """
-        containers = cronjob_spec['spec']['jobTemplate']['spec']['template']['spec']['containers']
-        container = containers[0]
-        
-        volume_mounts = container.get('volumeMounts', [])
-        assert len(volume_mounts) > 0, "Should have volume mounts"
-        
-        data_mount = next((m for m in volume_mounts if m['mountPath'] == '/data'), None)
-        assert data_mount is not None, "Should have /data mount"
-        assert data_mount['name'] == 'data', "Should mount 'data' volume"
-
-    def test_cj_013_pvc_claim_configured(self, cronjob_spec):
-        """CJ-013: PVC claim configured.
-        
-        Given the CronJob volumes are defined
-        When checked
-        Then PVC should reference f1-predictor-data
-        """
-        volumes = cronjob_spec['spec']['jobTemplate']['spec']['template']['spec'].get('volumes', [])
-        assert len(volumes) > 0, "Should have volumes"
-        
-        data_volume = next((v for v in volumes if v['name'] == 'data'), None)
-        assert data_volume is not None, "Should have 'data' volume"
-        assert 'persistentVolumeClaim' in data_volume, "Should be a PVC"
-        assert data_volume['persistentVolumeClaim']['claimName'] == 'f1-predictor-data', \
-            "PVC claim should be f1-predictor-data"
-
-    def test_cj_013_database_path_env_set(self, cronjob_spec):
-        """CJ-013: DATABASE_PATH environment variable set to /data.
-        
-        Given the CronJob container env vars
-        When checked
-        Then DATABASE_PATH should be /data/f1_predictions.db
-        """
-        containers = cronjob_spec['spec']['jobTemplate']['spec']['template']['spec']['containers']
-        container = containers[0]
-        
-        env = {e['name']: e['value'] for e in container.get('env', [])}
-        assert 'DATABASE_PATH' in env, "Should have DATABASE_PATH env var"
-        assert env['DATABASE_PATH'] == '/data/f1_predictions.db', \
-            "DATABASE_PATH should be /data/f1_predictions.db"
-
-    def test_cj_013_job_completes_with_concurrency_policy(self, cronjob_spec):
-        """CJ-013: Job concurrency policy prevents overlaps.
-        
-        Given the CronJob spec
-        When checked
-        Then concurrencyPolicy should be Forbid (prevents overlapping runs)
-        """
-        assert cronjob_spec['spec'].get('concurrencyPolicy') == 'Forbid', \
-            "ConcurrencyPolicy should be Forbid"
-
-    def test_cj_013_successful_jobs_history_limit(self, cronjob_spec):
-        """CJ-013: Successful jobs history is limited.
-        
-        Given the CronJob spec
-        When checked
-        Then successfulJobsHistoryLimit should be set
-        """
-        assert 'successfulJobsHistoryLimit' in cronjob_spec['spec'], \
-            "Should have successfulJobsHistoryLimit"
-        assert cronjob_spec['spec']['successfulJobsHistoryLimit'] == 2
 
 
 class TestRaceManagerCronJob:
@@ -159,17 +51,68 @@ class TestRaceManagerCronJob:
 
     def test_race_manager_has_pvc_mount(self, race_manager_spec):
         """Race-manager has PVC mounted at /data.
-        
+
         Given the race-manager CronJob
         When checked
         Then /data should be mounted
         """
         containers = race_manager_spec['spec']['jobTemplate']['spec']['template']['spec']['containers']
         container = containers[0]
-        
+
         volume_mounts = container.get('volumeMounts', [])
         data_mount = next((m for m in volume_mounts if m['mountPath'] == '/data'), None)
         assert data_mount is not None, "Should have /data mount"
+
+    def test_race_manager_schedule_frequent_enough_for_30min_ac(self, race_manager_spec):
+        """BUD-127: outer cron cadence must be <= 30 min so results/scores can
+        land within the 'correct within 30 minutes of official results' AC.
+
+        Given the race-manager CronJob schedule
+        When parsed as a 5-field cron expression
+        Then the minute field must fire at least every 30 minutes
+        """
+        schedule = race_manager_spec['spec']['schedule']
+        minute_field = schedule.split()[0]
+        assert minute_field.startswith('*/'), (
+            f"Expected a '*/N' minute cadence, got {minute_field!r} in schedule {schedule!r}"
+        )
+        step = int(minute_field[2:])
+        assert step <= 30, f"CronJob only fires every {step} min — too slow for the 30-min AC"
+
+
+class TestKustomizationWiring:
+    """BUD-127 (F1-05): guard that the score-update pipeline is actually
+    deployed. The fetch-results and lock-races CronJobs were superseded by
+    f1-race-manager but were never removed from base/kustomization.yaml
+    resources in the first place — this pins down what IS deployed so a
+    future edit can't silently drop the pipeline out of kustomization.
+    """
+
+    @pytest.fixture
+    def kustomization(self):
+        yaml_path = os.path.join(
+            os.path.dirname(__file__), '..', '..', 'base', 'kustomization.yaml'
+        )
+        with open(yaml_path) as f:
+            return yaml.safe_load(f)
+
+    def test_race_manager_cronjob_is_deployed(self, kustomization):
+        """The score-update pipeline's CronJob must be a base resource."""
+        assert 'race-manager-cronjob.yaml' in kustomization['resources'], (
+            "f1-race-manager is the only CronJob that fetches results and "
+            "updates scores/leaderboard — it must stay in base/kustomization.yaml"
+        )
+
+    def test_orphaned_cronjob_manifests_removed(self):
+        """The superseded fetch-results/lock-races manifests should not
+        reappear — they duplicated race-manager's job without its state
+        machine and were never deployed via kustomization anyway."""
+        base_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'base')
+        for stale_name in ('fetch-results-cronjob.yaml', 'lock-races-cronjob.yaml'):
+            assert not os.path.exists(os.path.join(base_dir, stale_name)), (
+                f"{stale_name} was removed as dead config in BUD-127 — "
+                "re-add only alongside a kustomization.yaml resources entry"
+            )
 
 
 class TestPVCManifest:

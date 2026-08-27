@@ -14,7 +14,18 @@
 
 **Issue:** After a race, points don’t show or leaderboard isn’t updated.
 
-**Causes:**
+**Status (BUD-127 / F1-05, 2026-08-27):** The originally-proposed hourly
+`f1-fetch-results` + per-minute `f1-lock-races` CronJobs below were
+superseded by the `f1-race-manager` state machine (`cron/race_manager.py`,
+`base/race-manager-cronjob.yaml`, added in BUD-77) and their manifests were
+removed as dead config — they were never wired into `base/kustomization.yaml`.
+`f1-race-manager` is the only deployed job for this pipeline: it locks races,
+polls OpenF1 every 5 min once a race is expected to have finished, and writes
+results + scores. `tests/unit/test_cronjob_deployment.py::TestKustomizationWiring`
+and `tests/unit/test_race_manager.py::TestScoreUpdateTimingBudget` guard
+against this regressing.
+
+**Causes (historical):**
 
 1. **Points page exists:** Leaderboard is at **/leaderboard** (nav: “Leaderboard”). It shows total score and per-race points. If points are “-” for a race, either:
    - Results for that race were never entered, or
