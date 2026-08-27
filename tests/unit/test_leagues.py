@@ -133,7 +133,15 @@ class TestDefaultScoringWindow:
 
         db = get_db()
         _insert_race(db, round_num=1, status='completed', hours_from_now=-500)
+        race1_id = db.execute('SELECT id FROM races WHERE round = 1').fetchone()['id']
+        # A race only computes as 'completed' once results exist (status column
+        # alone isn't enough - see compute_race_status).
+        db.execute(
+            'INSERT INTO results (race_id, p1_driver_id, p2_driver_id, p3_driver_id) VALUES (?, 1, 2, 3)',
+            (race1_id,)
+        )
         _insert_race(db, round_num=2, status='locked', hours_from_now=-1)
+        db.commit()
 
         _login(client, 'window_fallback')
 
