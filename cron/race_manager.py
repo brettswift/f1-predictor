@@ -28,6 +28,8 @@ from datetime import datetime, timezone, timedelta
 # openf1.py lives in src/, a sibling of this cron/ directory.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import openf1
+import fetch_attempts
+from fetch_attempts import FetchFailure, Outcome
 
 logging.basicConfig(
     level=logging.INFO,
@@ -171,15 +173,25 @@ def _resolve_session_key(db, race_id, round_num, season, session_key=None):
     """
     if session_key:
         return session_key
+    cache_key = f"sessions?year={season}&session_type=Race"
     try:
-        for session_data in openf1.get_race_sessions(season=season, db=db).data:
-            if session_data.get('round') == round_num:
-                db.execute('UPDATE races SET session_key = ? WHERE id = ?',
-                           (session_data['session_key'], race_id))
-                db.commit()
-                return session_data['session_key']
+        sessions = openf1.get_race_sessions(season=season, db=db).data
     except openf1.OpenF1Error as e:
+        fetch_attempts.record_fetch_attempt(
+            db, 'sessions', cache_key, fetch_attempts.outcome_for_error(e),
+            http_status=getattr(e, 'status_code', None), race_id=race_id, detail=str(e),
+        )
         logger.warning("Could not resolve session_key for race %s: %s", race_id, e)
+        return None
+    fetch_attempts.record_fetch_attempt(
+        db, 'sessions', cache_key, Outcome.OK if sessions else Outcome.EMPTY, race_id=race_id,
+    )
+    for session_data in sessions:
+        if session_data.get('round') == round_num:
+            db.execute('UPDATE races SET session_key = ? WHERE id = ?',
+                       (session_data['session_key'], race_id))
+            db.commit()
+            return session_data['session_key']
     return None
 
 
@@ -191,15 +203,35 @@ def _get_driver_id_by_number(db, driver_number):
     return row['id'] if row else None
 
 
-def _fetch_podium(db, session_key):
+def _fetch_podium(db, session_key, race_id=None, race_date=None):
+    endpoint = 'session_result'
+    cache_key = f"session_result?session_key={session_key}"
     try:
         podium = openf1.get_podium(session_key, db=db)
     except openf1.OpenF1Error as e:
+        outcome = fetch_attempts.outcome_for_error(e)
+        fetch_attempts.record_fetch_attempt(
+            db, endpoint, cache_key, outcome, http_status=getattr(e, 'status_code', None),
+            session_key=session_key, race_id=race_id, detail=str(e),
+        )
         logger.error("OpenF1 request failed for session %s: %s", session_key, e)
-        return None
+        raise FetchFailure(f"OpenF1 request failed for session {session_key}: {e}", outcome) from e
+
     if not podium:
+        finished_long_ago = fetch_attempts.race_finished_long_ago(race_date) if race_date else False
+        fetch_attempts.record_fetch_attempt(
+            db, endpoint, cache_key, Outcome.EMPTY, session_key=session_key, race_id=race_id,
+            detail='race finished >4h ago' if finished_long_ago else None,
+        )
+        if finished_long_ago:
+            msg = f"No podium for session {session_key} more than 4h after race start"
+            logger.error(msg)
+            raise FetchFailure(msg, Outcome.EMPTY)
         return None
 
+    fetch_attempts.record_fetch_attempt(
+        db, endpoint, cache_key, Outcome.OK, session_key=session_key, race_id=race_id,
+    )
     resolved = {}
     for slot in ('p1', 'p2', 'p3'):
         driver_db_id = _get_driver_id_by_number(db, podium[slot]['driver_number'])
@@ -264,11 +296,13 @@ def _save_results_and_score(db, race_id, podium):
 def poll_for_results(db, now):
     rows = db.execute('''
         SELECT rs.race_id, rs.entered_at, rs.last_poll_at, rs.poll_count,
-               r.name, r.round, r.session_key
+               r.name, r.round, r.date, r.session_key
         FROM race_stages rs
         JOIN races r ON r.id = rs.race_id
         WHERE rs.stage = 'polling'
     ''').fetchall()
+
+    failures = []
 
     for r in rows:
         started = _parse_dt(r['entered_at'])
@@ -287,7 +321,19 @@ def poll_for_results(db, now):
 
         logger.info("poll #%d   %s (round %d)", r['poll_count'] + 1, r['name'], r['round'])
         session_key = _resolve_session_key(db, r['race_id'], r['round'], F1_SEASON, r['session_key'])
-        podium = _fetch_podium(db, session_key) if session_key else None
+        podium = None
+        if session_key:
+            try:
+                podium = _fetch_podium(db, session_key, race_id=r['race_id'], race_date=r['date'])
+            except FetchFailure as e:
+                logger.error("❌ Fetch failed for %s: %s", r['name'], e)
+                failures.append(r['name'])
+                db.execute('''
+                    UPDATE race_stages SET last_poll_at = ?, poll_count = poll_count + 1
+                    WHERE race_id = ?
+                ''', (_now_iso(now), r['race_id']))
+                db.commit()
+                continue
 
         if podium:
             ok = _save_results_and_score(db, r['race_id'], podium)
@@ -305,6 +351,8 @@ def poll_for_results(db, now):
             ''', (_now_iso(now), r['race_id']))
             logger.info("  no results yet for %s", r['name'])
         db.commit()
+
+    return failures
 
 
 # ── status command ──────────────────────────────────────────────────
@@ -382,9 +430,13 @@ def main():
     promote_to_watching(db, now)
     promote_to_locked(db, now)
     promote_to_polling(db, now)
-    poll_for_results(db, now)
+    failures = poll_for_results(db, now)
 
     db.close()
+
+    if failures:
+        logger.error("Race manager fetch failed for: %s", ', '.join(failures))
+        sys.exit(1)
 
 
 if __name__ == '__main__':

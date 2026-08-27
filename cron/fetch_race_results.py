@@ -13,6 +13,8 @@ import logging
 # openf1.py lives in src/, a sibling of this cron/ directory.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import openf1
+import fetch_attempts
+from fetch_attempts import FetchFailure, Outcome
 
 # Setup logging
 logging.basicConfig(
@@ -72,15 +74,25 @@ def _resolve_session_key(db, race, season):
     key = race.get('session_key')
     if key:
         return key
+    cache_key = f"sessions?year={season}&session_type=Race"
     try:
-        for session_data in openf1.get_race_sessions(season=season, db=db).data:
-            if session_data.get('round') == race['round']:
-                db.execute('UPDATE races SET session_key = ? WHERE id = ?',
-                           (session_data['session_key'], race['id']))
-                db.commit()
-                return session_data['session_key']
+        sessions = openf1.get_race_sessions(season=season, db=db).data
     except openf1.OpenF1Error as e:
+        fetch_attempts.record_fetch_attempt(
+            db, 'sessions', cache_key, fetch_attempts.outcome_for_error(e),
+            http_status=getattr(e, 'status_code', None), race_id=race['id'], detail=str(e),
+        )
         logger.warning(f"Could not resolve session_key for race {race['id']}: {e}")
+        return None
+    fetch_attempts.record_fetch_attempt(
+        db, 'sessions', cache_key, Outcome.OK if sessions else Outcome.EMPTY, race_id=race['id'],
+    )
+    for session_data in sessions:
+        if session_data.get('round') == race['round']:
+            db.execute('UPDATE races SET session_key = ? WHERE id = ?',
+                       (session_data['session_key'], race['id']))
+            db.commit()
+            return session_data['session_key']
     return None
 
 
@@ -99,21 +111,45 @@ def fetch_race_results_from_api(db, race, season=None):
     Returns None when the race has not finished yet, its session_key cannot
     be resolved, or the podium drivers cannot be matched — all of which mean
     "try again next run" rather than an error.
+
+    Raises FetchFailure when OpenF1 failed after exhausting retries, or
+    returned no podium for a race that finished more than 4 hours ago — both
+    of which should fail the cron Job (BUD-125) rather than be swallowed.
     """
     season = season or F1_SEASON
     session_key = _resolve_session_key(db, race, season)
     if not session_key:
         return None
 
+    endpoint = 'session_result'
+    cache_key = f"session_result?session_key={session_key}"
     try:
         podium = openf1.get_podium(session_key, db=db)
     except openf1.OpenF1Error as e:
+        outcome = fetch_attempts.outcome_for_error(e)
+        fetch_attempts.record_fetch_attempt(
+            db, endpoint, cache_key, outcome, http_status=getattr(e, 'status_code', None),
+            session_key=session_key, race_id=race['id'], detail=str(e),
+        )
         logger.error(f"OpenF1 request failed: {e}")
-        return None
+        raise FetchFailure(f"OpenF1 request failed for {race['name']}: {e}", outcome) from e
+
     if not podium:
+        finished_long_ago = fetch_attempts.race_finished_long_ago(race.get('date'))
+        fetch_attempts.record_fetch_attempt(
+            db, endpoint, cache_key, Outcome.EMPTY, session_key=session_key, race_id=race['id'],
+            detail='race finished >4h ago' if finished_long_ago else None,
+        )
+        if finished_long_ago:
+            msg = f"No podium for {race['name']} more than 4h after it finished"
+            logger.error(msg)
+            raise FetchFailure(msg, Outcome.EMPTY)
         logger.info(f"Race not complete yet for {race['name']}")
         return None
 
+    fetch_attempts.record_fetch_attempt(
+        db, endpoint, cache_key, Outcome.OK, session_key=session_key, race_id=race['id'],
+    )
     resolved = {}
     for slot in ('p1', 'p2', 'p3'):
         driver_db_id = get_driver_id_by_number(db, podium[slot]['driver_number'])
@@ -281,12 +317,18 @@ def main():
         logger.info("No locked races awaiting results")
         sys.exit(0)
 
+    failures = []
+
     for race in races:
         logger.info(f"Checking race {race['round']}: {race['name']}")
 
         db = get_db()
         try:
             podium = fetch_race_results_from_api(db, race)
+        except FetchFailure as e:
+            logger.error(f"❌ Fetch failed for {race['name']}: {e}")
+            failures.append(race['name'])
+            continue
         finally:
             db.close()
 
@@ -298,6 +340,10 @@ def main():
                 logger.error(f"❌ Failed to update results for {race['name']}")
         else:
             logger.info(f"⏳ Results not available yet for {race['name']}")
+
+    if failures:
+        logger.error(f"Race results fetcher failed for: {', '.join(failures)}")
+        sys.exit(1)
 
     logger.info("Race results fetcher completed")
 

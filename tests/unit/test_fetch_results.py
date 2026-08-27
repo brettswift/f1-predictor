@@ -4,6 +4,7 @@ import pytest
 import os
 import sys
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 
 # Set test database BEFORE importing
@@ -179,35 +180,73 @@ class TestFetchRaceResultsFromApi:
         assert podium['p3']['driver_id'] == 3
 
     def test_cj_010_no_podium_returns_none(self):
-        """CJ-010: No data = retry next run.
+        """CJ-010: No data yet, race not finished long ago = retry next run.
 
         Given openf1.get_podium returns None (race not complete)
+        And the race started recently (within the 4h grace window)
         When fetch_race_results_from_api is called
-        Then None is returned (indicating retry needed)
+        Then None is returned (indicating retry needed) and an 'empty'
+        fetch_attempts row is recorded, but no FetchFailure is raised.
         """
         import fetch_race_results as fr
 
         db = _drivers_db()
+        recent = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime('%Y-%m-%d %H:%M:%S')
         db.execute(
             'INSERT INTO races (id, name, round, date, status, session_key) VALUES (?, ?, ?, ?, ?, ?)',
-            (2, 'Test Grand Prix', 2, '2026-03-08', 'locked', 9002),
+            (2, 'Test Grand Prix', 2, recent, 'locked', 9002),
         )
         race = dict(db.execute('SELECT * FROM races WHERE id = 2').fetchone())
 
         with patch('fetch_race_results.openf1.get_podium', return_value=None):
             podium = fr.fetch_race_results_from_api(db, race)
 
-        assert podium is None, "Should return None when no results available"
+        assert podium is None, "Should return None when no results available yet"
 
-    def test_cj_010_handles_api_error_gracefully(self):
-        """CJ-010: API error is handled gracefully.
+        row = db.execute("SELECT outcome, race_id FROM fetch_attempts WHERE race_id = 2").fetchone()
+        assert row is not None
+        assert row['outcome'] == 'empty'
 
-        Given openf1.get_podium raises OpenF1Error
+    def test_empty_podium_raises_fetch_failure_when_race_finished_long_ago(self):
+        """BUD-125: empty results for a race finished >4h ago fails the Job.
+
+        Given openf1.get_podium returns None
+        And the race started more than 4 hours ago
         When fetch_race_results_from_api is called
-        Then None is returned (not an exception)
+        Then a FetchFailure is raised and an 'empty' fetch_attempts row is
+        recorded — the caller (main()) turns this into a non-zero exit.
+        """
+        import fetch_race_results as fr
+        from fetch_attempts import FetchFailure
+
+        db = _drivers_db()
+        long_ago = (datetime.now(timezone.utc) - timedelta(hours=6)).strftime('%Y-%m-%d %H:%M:%S')
+        db.execute(
+            'INSERT INTO races (id, name, round, date, status, session_key) VALUES (?, ?, ?, ?, ?, ?)',
+            (2, 'Test Grand Prix', 2, long_ago, 'locked', 9002),
+        )
+        race = dict(db.execute('SELECT * FROM races WHERE id = 2').fetchone())
+
+        with patch('fetch_race_results.openf1.get_podium', return_value=None):
+            with pytest.raises(FetchFailure):
+                fr.fetch_race_results_from_api(db, race)
+
+        row = db.execute("SELECT outcome FROM fetch_attempts WHERE race_id = 2").fetchone()
+        assert row is not None
+        assert row['outcome'] == 'empty'
+
+    def test_cj_010_handles_api_error_by_failing(self):
+        """BUD-125: an exhausted-retry API error fails the fetch and is recorded.
+
+        Given openf1.get_podium raises OpenF1Error (retries already exhausted
+        inside openf1._get())
+        When fetch_race_results_from_api is called
+        Then a FetchFailure is raised (so the Job fails) and an
+        fetch_attempts row records the outcome and HTTP status.
         """
         import fetch_race_results as fr
         import openf1
+        from fetch_attempts import FetchFailure
 
         db = _drivers_db()
         db.execute(
@@ -216,10 +255,48 @@ class TestFetchRaceResultsFromApi:
         )
         race = dict(db.execute('SELECT * FROM races WHERE id = 3').fetchone())
 
-        with patch('fetch_race_results.openf1.get_podium', side_effect=openf1.OpenF1Error("boom")):
+        err = openf1.OpenF1Error("boom", status_code=503)
+        with patch('fetch_race_results.openf1.get_podium', side_effect=err):
+            with pytest.raises(FetchFailure):
+                fr.fetch_race_results_from_api(db, race)
+
+        row = db.execute("SELECT outcome, http_status FROM fetch_attempts WHERE race_id = 3").fetchone()
+        assert row is not None
+        assert row['outcome'] == 'http_error'
+        assert row['http_status'] == 503
+
+    def test_transient_failure_that_succeeds_on_retry_does_not_fail(self):
+        """BUD-125: a transient failure that succeeds on retry is not a Job failure.
+
+        Given the underlying HTTP call fails once then succeeds (handled
+        entirely inside openf1._get()'s own retry loop)
+        When fetch_race_results_from_api is called
+        Then the podium is returned normally, no FetchFailure is raised, and
+        the recorded outcome is 'ok'.
+        """
+        import fetch_race_results as fr
+
+        db = _drivers_db()
+        db.execute(
+            'INSERT INTO races (id, name, round, date, status, session_key) VALUES (?, ?, ?, ?, ?, ?)',
+            (7, 'Test Grand Prix', 7, '2026-03-15', 'locked', 9007),
+        )
+        race = dict(db.execute('SELECT * FROM races WHERE id = 7').fetchone())
+
+        openf1_podium = {
+            'p1': {'position': 1, 'driver_number': 1, 'driver_name': 'Max Verstappen'},
+            'p2': {'position': 2, 'driver_number': 4, 'driver_name': 'Lando Norris'},
+            'p3': {'position': 3, 'driver_number': 16, 'driver_name': 'Charles Leclerc'},
+        }
+        # get_podium itself succeeded (retries already happened inside
+        # openf1._get()); from this module's point of view that's just success.
+        with patch('fetch_race_results.openf1.get_podium', return_value=openf1_podium):
             podium = fr.fetch_race_results_from_api(db, race)
 
-        assert podium is None, "Should return None on API error, not raise exception"
+        assert podium is not None
+        row = db.execute("SELECT outcome FROM fetch_attempts WHERE race_id = 7").fetchone()
+        assert row is not None
+        assert row['outcome'] == 'ok'
 
     def test_unresolvable_driver_returns_none(self):
         """A podium driver number not in the drivers table means "skip ingest".

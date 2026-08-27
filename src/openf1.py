@@ -49,7 +49,21 @@ OFFLINE = os.environ.get("OPENF1_OFFLINE", "false").lower() == "true"
 
 
 class OpenF1Error(RuntimeError):
-    """Upstream failed and no usable cached payload was available."""
+    """
+    Upstream failed and no usable cached payload was available.
+
+    Carries just enough about the underlying failure (status_code, is_timeout)
+    for callers to classify the outcome for observability (BUD-125) without
+    parsing the message string. This does not change retry behavior — a 429
+    is still retried the same way a 5xx is; that distinction is tracked
+    separately (see BUD-125 notes).
+    """
+
+    def __init__(self, message: str, *, status_code: Optional[int] = None,
+                 is_timeout: bool = False):
+        super().__init__(message)
+        self.status_code = status_code
+        self.is_timeout = is_timeout
 
 
 @dataclass
@@ -184,7 +198,16 @@ def _get(path: str, params: Optional[dict] = None,
         if cached is not None:
             logger.warning("Serving cached %s from %s (age %s)", key, cached.fetched_at, cached.age_label())
             return cached
-    raise OpenF1Error(f"OpenF1 request failed and no cache available: {key}: {last_exc}")
+
+    status_code = None
+    is_timeout = isinstance(last_exc, requests.Timeout)
+    if isinstance(last_exc, requests.HTTPError) and last_exc.response is not None:
+        status_code = last_exc.response.status_code
+    raise OpenF1Error(
+        f"OpenF1 request failed and no cache available: {key}: {last_exc}",
+        status_code=status_code,
+        is_timeout=is_timeout,
+    )
 
 
 # --------------------------------------------------------------------------
