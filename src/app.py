@@ -9,11 +9,15 @@ Votes lock when the race starts. Results are user-triggered via a button with br
 
 import os
 import uuid
+import secrets
 import sqlite3
 import requests
 from datetime import datetime, timezone, timedelta
 
 from functools import wraps
+from urllib.parse import urlencode
+
+import click
 from flask import Flask, render_template, request, redirect, url_for, session, g, flash, jsonify
 
 import openf1
@@ -22,6 +26,7 @@ import fetch_attempts
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
 app.config['DATABASE'] = os.environ.get('DATABASE_PATH', '/data/f1_predictions.db')
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 
 # Environment configuration
 app.config['ENVIRONMENT'] = os.environ.get('ENVIRONMENT', 'dev')
@@ -38,6 +43,23 @@ RETRY_INTERVAL_SEC = 120
 LIVE_REFRESH_INTERVAL_SEC = 30  # Auto-refresh every 30 seconds
 LIVE_RATE_LIMIT_SEC = 10  # Minimum time between API calls
 LIVE_CACHE_TTL_SEC = 5  # Cache live data for 5 seconds
+
+# Magic-link authentication configuration
+LOGIN_TOKEN_BYTES = 32  # URL-safe token length
+LOGIN_TOKEN_TTL_MINUTES = 15  # Token validity window
+
+# Google OAuth configuration
+GOOGLE_AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth'
+GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token'
+GOOGLE_USERINFO_ENDPOINT = 'https://openidconnect.googleapis.com/v1/userinfo'
+GOOGLE_OAUTH_SCOPE = 'openid email profile'
+
+app.config['GOOGLE_OAUTH_CLIENT_ID'] = os.environ.get('GOOGLE_OAUTH_CLIENT_ID', '')
+app.config['GOOGLE_OAUTH_CLIENT_SECRET'] = os.environ.get('GOOGLE_OAUTH_CLIENT_SECRET', '')
+app.config['GOOGLE_OAUTH_REDIRECT_URI'] = os.environ.get(
+    'GOOGLE_OAUTH_REDIRECT_URI',
+    ''
+)
 
 # Simple in-memory cache for live data (keyed by race_id)
 _live_data_cache = {}
@@ -66,6 +88,12 @@ def inject_environment():
         app_version=os.environ.get('APP_VERSION', ''),
         f1_season=app.config['F1_SEASON']
     )
+
+
+@app.context_processor
+def inject_current_user():
+    """Make the current user available to all templates as current_user."""
+    return dict(current_user=get_current_user())
 
 # Database helpers
 def get_db():
@@ -126,7 +154,23 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             session_id TEXT PRIMARY KEY,
             username TEXT NOT NULL UNIQUE,
+            is_synthetic INTEGER DEFAULT 0,
+            persona TEXT,
+            email TEXT UNIQUE,
+            legacy_user INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # Magic-link login tokens
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS login_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            token TEXT NOT NULL UNIQUE,
+            used INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL
         )
     ''')
 
@@ -160,6 +204,37 @@ def init_db():
             round INTEGER NOT NULL,
             date TIMESTAMP NOT NULL,
             status TEXT DEFAULT 'open' CHECK (status IN ('upcoming', 'open', 'locked', 'completed'))
+        )
+    ''')
+
+    # Leagues table (F1-20 / BUD-150) - a league is a view over the global
+    # game, scoped to a scoring window. start_round is season-relative
+    # (races.round), NULL when whole_season is set.
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS leagues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            emoji_or_color TEXT NOT NULL,
+            start_round INTEGER,
+            whole_season BOOLEAN DEFAULT 0,
+            admin_user_id TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (admin_user_id) REFERENCES users(session_id)
+        )
+    ''')
+
+    # League membership - the creating admin is inserted here immediately
+    # (BUD-150); BUD-151 adds the invite/join flow on top of this shape.
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS league_members (
+            league_id INTEGER NOT NULL,
+            user_id TEXT NOT NULL,
+            joined_at_round INTEGER,
+            is_admin BOOLEAN DEFAULT 0,
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (league_id, user_id),
+            FOREIGN KEY (league_id) REFERENCES leagues(id),
+            FOREIGN KEY (user_id) REFERENCES users(session_id)
         )
     ''')
 
@@ -242,6 +317,24 @@ def _apply_migrations(db):
     new columns need an explicit ALTER. Every migration here is additive and
     idempotent — safe to run on every startup.
     """
+    users = _column_names(db, 'users')
+    if 'email' not in users:
+        # SQLite forbids UNIQUE in ALTER TABLE ADD COLUMN (only CREATE TABLE
+        # allows it) — add the column plain, then enforce uniqueness via a
+        # separate index. This would have crashed on first startup against
+        # any real pre-existing users table.
+        db.execute('ALTER TABLE users ADD COLUMN email TEXT')
+        db.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)')
+        app.logger.info('Migration: users.email added')
+
+    if 'legacy_user' not in users:
+        db.execute('ALTER TABLE users ADD COLUMN legacy_user INTEGER DEFAULT 0')
+        db.execute('''
+            UPDATE users SET legacy_user = 1
+            WHERE email IS NULL OR email = ''
+        ''')
+        app.logger.info('Migration: users.legacy_user added and flagged existing anonymous users')
+
     races = _column_names(db, 'races')
     if 'session_key' not in races:
         # OpenF1 keys results by session_key; without it we cannot fetch results.
@@ -260,6 +353,14 @@ def _apply_migrations(db):
         if column not in results:
             db.execute(ddl)
             app.logger.info('Migration: results.%s added', column)
+
+    users = _column_names(db, 'users')
+    if 'is_synthetic' not in users:
+        db.execute('ALTER TABLE users ADD COLUMN is_synthetic INTEGER DEFAULT 0')
+        app.logger.info('Migration: users.is_synthetic added')
+    if 'persona' not in users:
+        db.execute('ALTER TABLE users ADD COLUMN persona TEXT')
+        app.logger.info('Migration: users.persona added')
 
 # --- API fetching ---
 
@@ -839,6 +940,11 @@ def is_admin(user):
     return user and user['username'].strip().lower() in ADMIN_USERNAMES
 
 
+def is_legacy_user(user):
+    """Return True for existing anonymous users who still need email migration."""
+    return user is not None and user['legacy_user'] and not user['email']
+
+
 def admin_required(f):
     """Decorator: require admin user for lock/enter-results routes."""
     @wraps(f)
@@ -865,6 +971,207 @@ def get_current_user():
         'SELECT * FROM users WHERE session_id = ?', (session_id,)
     ).fetchone()
     return user
+
+
+def _normalize_email(email):
+    """Normalize email for storage and lookup."""
+    return (email or '').strip().lower()
+
+
+def _generate_login_token():
+    """Generate a URL-safe one-time login token."""
+    return secrets.token_urlsafe(LOGIN_TOKEN_BYTES)
+
+
+def _login_token_url(token):
+    """Build the relative magic-link URL for a token."""
+    return url_for('login_verify', token=token, _external=False)
+
+
+def create_login_token(email):
+    """Create a magic-link token for the given email and log it for debug/tests.
+
+    Returns the raw token string. In production this would send an email;
+    here we log the link to stdout so tests and dev can retrieve it.
+    """
+    db = get_db()
+    normalized = _normalize_email(email)
+    token = _generate_login_token()
+    expires_at = _now_utc() + timedelta(minutes=LOGIN_TOKEN_TTL_MINUTES)
+
+    # Invalidate any prior unused token for this email before creating a new one.
+    db.execute(
+        'UPDATE login_tokens SET used = 1 WHERE email = ? AND used = 0',
+        (normalized,)
+    )
+    db.execute('''
+        INSERT INTO login_tokens (email, token, expires_at)
+        VALUES (?, ?, ?)
+    ''', (normalized, token, expires_at.strftime('%Y-%m-%d %H:%M:%S')))
+    db.commit()
+
+    link = _login_token_url(token)
+    app.logger.info('MAGIC-LINK email=%s token=%s link=%s', normalized, token, link)
+    return token
+
+
+def _get_token_record(db, token):
+    """Fetch a non-expired token record, or None if invalid/expired."""
+    now = _now_utc().strftime('%Y-%m-%d %H:%M:%S')
+    return db.execute('''
+        SELECT * FROM login_tokens
+        WHERE token = ? AND used = 0 AND expires_at > ?
+    ''', (token, now)).fetchone()
+
+
+def _find_user_by_email(db, email):
+    """Fetch user by normalized email."""
+    return db.execute(
+        'SELECT * FROM users WHERE email = ?', (_normalize_email(email),)
+    ).fetchone()
+
+
+def consume_login_token(token):
+    """Validate a login token and return the associated email.
+
+    Returns the normalized email on success, or None if the token is invalid,
+    expired, or already used. Marks the token as used on success.
+    """
+    db = get_db()
+    record = _get_token_record(db, token)
+    if not record:
+        return None
+
+    db.execute('UPDATE login_tokens SET used = 1 WHERE id = ?', (record['id'],))
+    db.commit()
+    return record['email']
+
+
+def bind_email_to_session(email):
+    """Ensure a user row exists for the email and attach it to the session.
+
+    If a user with this email already exists, their session_id becomes the
+    current session. Otherwise a new user is created (or the current anonymous
+    user is upgraded when possible) and the email is bound to it.
+    """
+    db = get_db()
+    normalized = _normalize_email(email)
+    existing = _find_user_by_email(db, normalized)
+
+    if existing:
+        session['session_id'] = existing['session_id']
+        return existing['session_id']
+
+    current_session_id = session.get('session_id')
+    current_user = None
+    if current_session_id:
+        current_user = db.execute(
+            'SELECT * FROM users WHERE session_id = ?', (current_session_id,)
+        ).fetchone()
+
+    if current_user and not current_user['email']:
+        # Upgrade anonymous user in-place; username stays the same.
+        try:
+            db.execute(
+                'UPDATE users SET email = ?, legacy_user = 0 WHERE session_id = ?',
+                (normalized, current_session_id)
+            )
+            db.commit()
+            return current_session_id
+        except sqlite3.IntegrityError:
+            # Race: another session claimed the email; fall through to create new.
+            pass
+
+    # Create a fresh user bound to this email.
+    new_session_id = str(uuid.uuid4())
+    # Derive a username from the email local part; ensure uniqueness.
+    base_username = normalized.split('@')[0] or 'user'
+    username = base_username
+    attempt = 1
+    while True:
+        try:
+            db.execute('''
+                INSERT INTO users (session_id, username, email, legacy_user)
+                VALUES (?, ?, ?, ?)
+            ''', (new_session_id, username, normalized, 0))
+            db.commit()
+            break
+        except sqlite3.IntegrityError:
+            username = f"{base_username}_{attempt}"
+            attempt += 1
+
+    session['session_id'] = new_session_id
+    session.permanent = True
+    return new_session_id
+
+
+def _get_google_oauth_redirect_uri():
+    """Return the configured Google OAuth redirect URI, or derive one."""
+    configured = app.config.get('GOOGLE_OAUTH_REDIRECT_URI', '')
+    if configured:
+        return configured
+    return url_for('login_oauth_google_callback', _external=True)
+
+
+def _generate_oauth_state():
+    """Generate a short-lived CSRF state token for the OAuth flow."""
+    return secrets.token_urlsafe(16)
+
+
+def _google_auth_url(state):
+    """Build the Google OAuth authorization request URL."""
+    params = {
+        'client_id': app.config['GOOGLE_OAUTH_CLIENT_ID'],
+        'redirect_uri': _get_google_oauth_redirect_uri(),
+        'response_type': 'code',
+        'scope': GOOGLE_OAUTH_SCOPE,
+        'state': state,
+        'access_type': 'online',
+    }
+    return f'{GOOGLE_AUTH_ENDPOINT}?{urlencode(params)}'
+
+
+def _exchange_google_code(code):
+    """Exchange an authorization code for Google OAuth tokens.
+
+    Returns the JSON token response on success, or None on failure.
+    """
+    try:
+        response = requests.post(
+            GOOGLE_TOKEN_ENDPOINT,
+            data={
+                'code': code,
+                'client_id': app.config['GOOGLE_OAUTH_CLIENT_ID'],
+                'client_secret': app.config['GOOGLE_OAUTH_CLIENT_SECRET'],
+                'redirect_uri': _get_google_oauth_redirect_uri(),
+                'grant_type': 'authorization_code',
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        app.logger.warning(f'Google token exchange failed: {e}')
+        return None
+
+
+def _fetch_google_userinfo(access_token):
+    """Fetch the user's Google profile via the OAuth userinfo endpoint.
+
+    Returns a dict with at least an 'email' key on success, or None.
+    """
+    try:
+        response = requests.get(
+            GOOGLE_USERINFO_ENDPOINT,
+            headers={'Authorization': f'Bearer {access_token}'},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        app.logger.warning(f'Google userinfo fetch failed: {e}')
+        return None
+
 
 def calculate_score(prediction, result):
     """Calculate score for a prediction."""
@@ -930,6 +1237,90 @@ def get_next_open_race(db):
             return r
     return None
 
+
+def _current_or_next_round(db):
+    """Resolve "current round forward" for a new league's default scoring window.
+
+    Prefers the next open race (same logic as get_next_open_race). If none is
+    open (e.g. a race is locked/in-progress with nothing else open yet), fall
+    back to the next non-completed race so a league created mid-weekend still
+    starts at a sensible round rather than silently reverting to null/whole
+    season.
+    """
+    races = get_races_with_computed_status(db)
+    for r in races:
+        if r['status'] == 'open':
+            return r['round']
+    for r in races:
+        if r['status'] != 'completed':
+            return r['round']
+    return races[-1]['round'] if races else None
+
+
+def create_league(db, admin_user_id, name, emoji_or_color, whole_season=False, start_round=None):
+    """Create a league and immediately seat the creator as its admin member.
+
+    No predictions/scores rows are touched here - a league is purely a view
+    over the existing global game (E3).
+    """
+    name = (name or '').strip()
+    emoji_or_color = (emoji_or_color or '').strip()
+    if not name:
+        raise ValueError('League name is required')
+    if not emoji_or_color:
+        raise ValueError('Emoji or color is required')
+
+    current_round = _current_or_next_round(db)
+
+    if whole_season:
+        resolved_start_round = None
+    elif start_round is not None:
+        resolved_start_round = start_round
+    else:
+        resolved_start_round = current_round
+
+    cur = db.execute(
+        '''INSERT INTO leagues (name, emoji_or_color, start_round, whole_season, admin_user_id)
+           VALUES (?, ?, ?, ?, ?)''',
+        (name, emoji_or_color, resolved_start_round, 1 if whole_season else 0, admin_user_id)
+    )
+    league_id = cur.lastrowid
+
+    db.execute(
+        '''INSERT INTO league_members (league_id, user_id, joined_at_round, is_admin)
+           VALUES (?, ?, ?, 1)''',
+        (league_id, admin_user_id, current_round)
+    )
+    db.commit()
+    return league_id
+
+
+def is_league_member(db, league_id, user_id):
+    """Membership lookup - true immediately for the creating admin, no separate invite needed."""
+    row = db.execute(
+        'SELECT 1 FROM league_members WHERE league_id = ? AND user_id = ?',
+        (league_id, user_id)
+    ).fetchone()
+    return row is not None
+
+
+def get_league_members(db, league_id):
+    return db.execute(
+        'SELECT * FROM league_members WHERE league_id = ? ORDER BY joined_at',
+        (league_id,)
+    ).fetchall()
+
+
+def get_user_leagues(db, user_id):
+    """Leagues a user belongs to, most recently created first."""
+    return db.execute(
+        '''SELECT l.* FROM leagues l
+           JOIN league_members lm ON lm.league_id = l.id
+           WHERE lm.user_id = ?
+           ORDER BY l.created_at DESC''',
+        (user_id,)
+    ).fetchall()
+
 # --- Routes ---
 
 @app.route('/')
@@ -960,15 +1351,17 @@ def set_username():
         # Reuse existing user's session_id
         session_id = existing['session_id']
     else:
-        # Create new user with new session_id
+        # Create new user with new session_id; new anonymous users are not
+        # flagged as legacy (they signed up after email auth was available).
         session_id = str(uuid.uuid4())
         db.execute(
-            'INSERT INTO users (session_id, username) VALUES (?, ?)',
-            (session_id, username)
+            'INSERT INTO users (session_id, username, is_synthetic, legacy_user) VALUES (?, ?, 0, ?)',
+            (session_id, username, 0)
         )
         db.commit()
 
     session['session_id'] = session_id
+    session.permanent = True
     return redirect(url_for('home'))
 
 @app.route('/home')
@@ -1114,11 +1507,13 @@ def leaderboard():
     race_filter_args = (str(filter_year),)
 
     # Get users with scores filtered by season
+    # F1-111: exclude synthetic replay/persona users from public leaderboards.
     users = db.execute(f'''
         SELECT u.*, COALESCE(SUM(s.points), 0) as total_score
         FROM users u
         LEFT JOIN scores s ON u.session_id = s.user_id
         LEFT JOIN races r ON s.race_id = r.id
+        WHERE u.is_synthetic = 0
         GROUP BY u.session_id
         HAVING COUNT(CASE WHEN r.id IS NOT NULL THEN 1 END) = 0
            OR SUM(CASE WHEN strftime('%Y', r.date) = ? THEN s.points ELSE 0 END) >= 0
@@ -1131,6 +1526,7 @@ def leaderboard():
         FROM users u
         LEFT JOIN scores s ON u.session_id = s.user_id
         LEFT JOIN races r ON s.race_id = r.id AND strftime('%Y', r.date) = ?
+        WHERE u.is_synthetic = 0
         GROUP BY u.session_id
         ORDER BY total_score DESC
     ''', (str(filter_year),)).fetchall()
@@ -1231,12 +1627,14 @@ def live():
             user_points_per_race[race['id']] = score['points'] if score else 0
 
     # Calculate aggregate leaderboard
+    # F1-111: exclude synthetic replay/persona users from live leaderboards.
     leaderboard = db.execute('''
         SELECT u.session_id, u.username,
                COALESCE(SUM(s.points), 0) as total_score
         FROM users u
         LEFT JOIN scores s ON u.session_id = s.user_id
         LEFT JOIN races r ON s.race_id = r.id AND strftime('%Y', r.date) = ?
+        WHERE u.is_synthetic = 0
         GROUP BY u.session_id
         ORDER BY total_score DESC
     ''', (str(season),)).fetchall()
@@ -1258,6 +1656,73 @@ def live():
                           current_user=user,
                           season=season,
                           refresh_interval=60)
+
+@app.route('/leagues')
+def leagues():
+    """List the current user's leagues."""
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+
+    db = get_db()
+    user_leagues = get_user_leagues(db, user['session_id'])
+    return render_template('leagues.html', leagues=user_leagues)
+
+
+@app.route('/leagues/new', methods=['GET'])
+def new_league():
+    """Show the create-league form."""
+    user = get_current_user()
+    if not user:
+        flash('Please sign in to create a league', 'error')
+        return redirect(url_for('index'))
+    return render_template('league_new.html')
+
+
+@app.route('/leagues', methods=['POST'])
+def create_league_route():
+    """Create a league (name + emoji/color required; scoring window optional)."""
+    user = get_current_user()
+    if not user:
+        flash('Please sign in to create a league', 'error')
+        return redirect(url_for('index'))
+
+    name = request.form.get('name', '').strip()
+    emoji_or_color = request.form.get('emoji_or_color', '').strip()
+    window = request.form.get('window', 'current')  # 'current' (default) | 'whole_season'
+
+    if not name or not emoji_or_color:
+        flash('League name and emoji/color are required', 'error')
+        return redirect(url_for('new_league'))
+
+    db = get_db()
+    league_id = create_league(
+        db, user['session_id'], name, emoji_or_color,
+        whole_season=(window == 'whole_season'),
+    )
+    flash('League created!', 'success')
+    return redirect(url_for('league_detail', league_id=league_id))
+
+
+@app.route('/leagues/<int:league_id>')
+def league_detail(league_id):
+    """League detail: name, emoji/color, scoring window, members."""
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+
+    db = get_db()
+    league = db.execute('SELECT * FROM leagues WHERE id = ?', (league_id,)).fetchone()
+    if not league:
+        flash('League not found', 'error')
+        return redirect(url_for('leagues'))
+
+    members = get_league_members(db, league_id)
+    return render_template('league_detail.html',
+                          league=league,
+                          members=members,
+                          is_member=is_league_member(db, league_id, user['session_id']))
+
 
 @app.route('/races')
 def races():
@@ -1329,7 +1794,7 @@ def _race_detail_impl(race_id, db, user):
         JOIN drivers d1 ON p.p1_driver_id = d1.id
         JOIN drivers d2 ON p.p2_driver_id = d2.id
         JOIN drivers d3 ON p.p3_driver_id = d3.id
-        WHERE p.race_id = ?
+        WHERE p.race_id = ? AND u.is_synthetic = 0
         ORDER BY u.username
     ''', (race_id,)).fetchall()
 
@@ -1464,6 +1929,7 @@ def live_leaderboard(race_id):
     data_age_label = getattr(live_positions, 'age_label', None)
     
     # Get all predictions for this race with projected points
+    # F1-111: exclude synthetic replay/persona users from live race leaderboards.
     predictions = db.execute('''
         SELECT p.*, u.username,
                d1.name as p1_name, d1.driver_id as p1_api_id,
@@ -1474,7 +1940,7 @@ def live_leaderboard(race_id):
         JOIN drivers d1 ON p.p1_driver_id = d1.id
         JOIN drivers d2 ON p.p2_driver_id = d2.id
         JOIN drivers d3 ON p.p3_driver_id = d3.id
-        WHERE p.race_id = ?
+        WHERE p.race_id = ? AND u.is_synthetic = 0
         ORDER BY u.username
     ''', (race_id,)).fetchall()
     
@@ -1545,11 +2011,203 @@ def live_leaderboard(race_id):
     )
 
 
+@app.route('/login', methods=['GET'])
+def login():
+    """Show email login form."""
+    return render_template('login.html')
+
+
+@app.route('/login/request', methods=['POST'])
+def login_request():
+    """Request a magic-link login email."""
+    email = request.form.get('email', '').strip()
+    if not email or '@' not in email:
+        flash('Please enter a valid email address', 'error')
+        return redirect(url_for('login'))
+
+    create_login_token(email)
+    return render_template('login_sent.html', email=_normalize_email(email))
+
+
+@app.route('/login/verify/<token>')
+def login_verify(token):
+    """Consume a magic-link token and log the user in."""
+    email = consume_login_token(token)
+    if not email:
+        flash('That login link is invalid or has expired.', 'error')
+        return redirect(url_for('login'))
+
+    bind_email_to_session(email)
+    flash('You are now logged in.', 'success')
+    return redirect(url_for('home'))
+
+
+@app.route('/login/oauth/google')
+def login_oauth_google():
+    """Initiate Google OAuth sign-in."""
+    client_id = app.config.get('GOOGLE_OAUTH_CLIENT_ID', '')
+    if not client_id:
+        flash('Google sign-in is not configured.', 'error')
+        return redirect(url_for('login'))
+
+    state = _generate_oauth_state()
+    session['oauth_state'] = state
+    return redirect(_google_auth_url(state))
+
+
+@app.route('/login/oauth/google/callback')
+def login_oauth_google_callback():
+    """Handle the Google OAuth callback and log the user in."""
+    stored_state = session.pop('oauth_state', None)
+    returned_state = request.args.get('state')
+    if not stored_state or not returned_state or stored_state != returned_state:
+        flash('Invalid OAuth state. Please try again.', 'error')
+        return redirect(url_for('login'))
+
+    code = request.args.get('code')
+    if not code:
+        flash('Google sign-in was cancelled or failed.', 'error')
+        return redirect(url_for('login'))
+
+    token_response = _exchange_google_code(code)
+    if not token_response:
+        flash('Unable to verify Google sign-in.', 'error')
+        return redirect(url_for('login'))
+
+    access_token = token_response.get('access_token')
+    if not access_token:
+        flash('Unable to verify Google sign-in.', 'error')
+        return redirect(url_for('login'))
+
+    userinfo = _fetch_google_userinfo(access_token)
+    if not userinfo or not userinfo.get('email'):
+        flash('Unable to retrieve your email from Google.', 'error')
+        return redirect(url_for('login'))
+
+    email = userinfo['email']
+    if not userinfo.get('email_verified'):
+        flash('Please use a Google account with a verified email.', 'error')
+        return redirect(url_for('login'))
+
+    bind_email_to_session(email)
+    session.permanent = True
+    flash('You are now logged in with Google.', 'success')
+    return redirect(url_for('home'))
+
+
 @app.route('/logout')
 def logout():
     """Clear session."""
     session.clear()
     return redirect(url_for('index'))
+
+
+@app.route('/debug/magic-link/<email>')
+def debug_magic_link(email):
+    """Debug endpoint: return the latest unused magic link for an email.
+
+    Only available in dev/test environments so tests can retrieve tokens
+    without parsing stdout.
+    """
+    if app.config.get('ENVIRONMENT') != 'dev' and not os.environ.get('TESTING'):
+        return jsonify({'error': 'Not available'}), 404
+
+    db = get_db()
+    normalized = _normalize_email(email)
+    now = _now_utc().strftime('%Y-%m-%d %H:%M:%S')
+    row = db.execute('''
+        SELECT token, expires_at FROM login_tokens
+        WHERE email = ? AND used = 0 AND expires_at > ?
+        ORDER BY created_at DESC LIMIT 1
+    ''', (normalized, now)).fetchone()
+
+    if not row:
+        return jsonify({'token': None, 'link': None})
+
+    token = row['token']
+    return jsonify({
+        'token': token,
+        'link': _login_token_url(token),
+        'expires_at': row['expires_at'],
+    })
+
+
+@app.route('/migrate', methods=['GET'])
+def migrate():
+    """Show legacy-user migration prompt.
+
+    Legacy users (existing anonymous users created before email auth) land
+    here from the banner or direct link to add an email and keep their
+    prediction history.
+    """
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+    if user['email']:
+        flash('Your account already has an email.', 'info')
+        return redirect(url_for('home'))
+    return render_template('migrate.html', user=user)
+
+
+@app.route('/migrate/send', methods=['POST'])
+def migrate_send():
+    """Create a magic link for a legacy user migrating to email login.
+
+    Refuses emails already bound to another account so the current
+    session's predictions are not orphaned by bind_email_to_session.
+    """
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+    if user['email']:
+        flash('Your account already has an email.', 'info')
+        return redirect(url_for('home'))
+
+    email = request.form.get('email', '').strip()
+    normalized = _normalize_email(email)
+    if not normalized or '@' not in normalized:
+        flash('Please enter a valid email address', 'error')
+        return redirect(url_for('migrate'))
+
+    db = get_db()
+    existing = _find_user_by_email(db, normalized)
+    if existing and existing['session_id'] != user['session_id']:
+        flash(
+            'That email is already linked to another account. '
+            'Log out and use Log in with email, or choose a different email.',
+            'error'
+        )
+        return redirect(url_for('migrate'))
+
+    create_login_token(email)
+    return render_template('migrate_sent.html', email=normalized)
+
+
+@app.route('/admin/legacy-users', methods=['GET', 'POST'])
+@admin_required
+def admin_legacy_users():
+    """List legacy users and allow admins to trigger migration emails."""
+    db = get_db()
+
+    if request.method == 'POST':
+        email = request.form.get('email', '').strip()
+        normalized = _normalize_email(email)
+        if normalized and '@' in normalized:
+            create_login_token(email)
+            flash(f'Migration link created for {normalized}.', 'success')
+        else:
+            flash('Please enter a valid email address', 'error')
+        return redirect(url_for('admin_legacy_users'))
+
+    users = db.execute('''
+        SELECT session_id, username, email, created_at
+        FROM users
+        WHERE (email IS NULL OR email = '') AND legacy_user = 1
+        ORDER BY created_at ASC
+    ''').fetchall()
+
+    return render_template('admin_legacy_users.html', users=users)
+
 
 # Admin routes
 @app.route('/admin/enter-results/<int:race_id>', methods=['GET', 'POST'])
@@ -1773,6 +2431,43 @@ def before_request():
         return
     # Include predict and admin routes so /predict/N cannot bypass lock after race start
     auto_lock_races()
+
+
+# CLI commands
+@app.cli.command('list-legacy-users')
+def cli_list_legacy_users():
+    """List users who still need email migration."""
+    db = get_db()
+    users = db.execute('''
+        SELECT session_id, username, email, created_at
+        FROM users
+        WHERE (email IS NULL OR email = '') AND legacy_user = 1
+        ORDER BY created_at ASC
+    ''').fetchall()
+
+    if not users:
+        click.echo('No legacy users pending migration.')
+        return
+
+    click.echo(f'{len(users)} legacy user(s) pending migration:')
+    for user in users:
+        click.echo(
+            f"  - {user['username']} "
+            f"(session={user['session_id']}, created={user['created_at']})"
+        )
+
+
+@app.cli.command('send-migration-email')
+@click.argument('email')
+def cli_send_migration_email(email):
+    """Create a magic link for EMAIL and log it (stubbed sender)."""
+    normalized = _normalize_email(email)
+    if not normalized or '@' not in normalized:
+        raise click.BadParameter('Please provide a valid email address.')
+
+    create_login_token(email)
+    click.echo(f'Migration magic link created for {normalized}.')
+    click.echo('Check application logs or /debug/magic-link for the link.')
 
 
 # Initialize database on startup

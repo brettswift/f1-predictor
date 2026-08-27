@@ -324,6 +324,7 @@
                 <a href="{{ url_for('home') }}">Home</a>
                 <a href="{{ url_for('races') }}">Races</a>
                 <a href="{{ url_for('leaderboard') }}">Leaderboard</a>
+                <a href="{{ url_for('leagues') }}">Leagues</a>
                 {% if environment == 'dev' %}
                 <a href="/admin" target="_blank">Admin</a>
                 {% endif %}
@@ -334,6 +335,24 @@
     {% endif %}
     
     <main class="container">
+        {% if current_user and current_user['legacy_user'] and not current_user['email'] %}
+        <div class="card" style="border-color: #e10600;">
+            <div style="display: flex; flex-wrap: wrap; gap: 20px; align-items: center; justify-content: space-between;">
+                <div>
+                    <h2 style="margin-bottom: 8px;">🔒 Secure your predictions</h2>
+                    <p style="margin-bottom: 0; opacity: 0.9;">
+                        Add your email to keep your points and history safe across devices.
+                    </p>
+                </div>
+                <form method="POST" action="{{ url_for('migrate_send') }}" style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <input type="email" name="email" placeholder="you@example.com" required style="min-width: 220px; margin-bottom: 0;">
+                    <button type="submit" class="btn">Send link</button>
+                    <a href="{{ url_for('migrate') }}" class="btn btn-secondary">Learn more</a>
+                </form>
+            </div>
+        </div>
+        {% endif %}
+
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 {% for category, message in messages %}
@@ -341,7 +360,7 @@
                 {% endfor %}
             {% endif %}
         {% endwith %}
-        
+
         {% block content %}{% endblock %}
     </main>
 

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block title %}{{ league['name'] }} - F1 Predictor{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>{{ league['emoji_or_color'] }} {{ league['name'] }}</h2>
+    <p>
+        {% if league['whole_season'] %}
+        Scoring window: whole season
+        {% else %}
+        Scoring window: round {{ league['start_round'] }} forward
+        {% endif %}
+    </p>
+</div>
+
+<div class="card">
+    <h3>Members</h3>
+    <div class="table-scroll">
+    <table>
+        <thead>
+            <tr>
+                <th>User</th>
+                <th>Role</th>
+                <th>Joined</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for member in members %}
+            <tr>
+                <td>{{ member['user_id'] }}</td>
+                <td>{{ 'Admin' if member['is_admin'] else 'Member' }}</td>
+                <td>{{ member['joined_at'] }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+{% endblock %}
