@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block title %}Account - F1 Predictor{% endblock %}
+
+{% block content %}
+<div class="card" style="margin-top: 30px;">
+    <h1>Your account</h1>
+    <p style="opacity: 0.8; margin: 15px 0;">
+        Username: <strong>{{ user['username'] }}</strong><br>
+        {% if user['email'] %}
+        Email: <strong>{{ user['email'] }}</strong>
+        {% else %}
+        No email on file — this is a legacy anonymous account.
+        {% endif %}
+    </p>
+</div>
+
+<div class="card" style="margin-top: 20px;">
+    <h2>Export your data</h2>
+    <p style="opacity: 0.8; margin: 15px 0;">
+        Download a JSON file containing your profile, every prediction you've
+        made, and your race-by-race scores.
+    </p>
+    <a href="{{ url_for('account_export') }}" class="btn">Export data (JSON)</a>
+</div>
+
+<div class="card" style="margin-top: 20px; border: 1px solid rgba(225, 6, 0, 0.4);">
+    <h2>Delete your account</h2>
+    <p style="opacity: 0.8; margin: 15px 0;">
+        This permanently deletes your account, all of your predictions, and
+        all of your scores. This <strong>cannot be undone</strong>. Consider
+        exporting your data first.
+    </p>
+    <form method="POST" action="{{ url_for('account_delete') }}"
+          onsubmit="return confirm('Delete your account and all your data? This cannot be undone.');"
+          style="max-width: 400px;">
+        <label for="confirm" style="display: block; margin-bottom: 8px;">
+            Type your {{ 'email' if user['email'] else 'username' }}
+            (<strong>{{ user['email'] or user['username'] }}</strong>) to confirm:
+        </label>
+        <input type="text" id="confirm" name="confirm" required autocomplete="off"
+               placeholder="{{ user['email'] or user['username'] }}">
+        <button type="submit" class="btn" style="background: #e10600; width: 100%; margin-top: 10px;">
+            Permanently delete my account
+        </button>
+    </form>
+    <p style="opacity: 0.6; margin-top: 12px; font-size: 13px;">
+        Your data will be removed immediately.
+    </p>
+</div>
+
+<div class="card" style="margin-top: 20px;">
+    <h2>Privacy</h2>
+    <p style="opacity: 0.8; margin: 15px 0;">
+        Read how we handle your data.
+    </p>
+    <a href="{{ url_for('privacy') }}" class="btn btn-secondary">Privacy policy</a>
+</div>
+{% endblock %}
