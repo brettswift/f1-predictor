@@ -36,5 +36,10 @@
         </tbody>
     </table>
     </div>
+    {% if is_member %}
+    <div style="margin-top: 16px;">
+        <a href="{{ url_for('league_invite', league_id=league['id']) }}" class="btn">Invite someone</a>
+    </div>
+    {% endif %}
 </div>
 {% endblock %}

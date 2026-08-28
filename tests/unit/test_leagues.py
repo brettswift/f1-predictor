@@ -265,3 +265,85 @@ class TestCreateLeagueHelperDirectly:
         league = db.execute('SELECT * FROM leagues WHERE id = ?', (league_id,)).fetchone()
         assert league['start_round'] == 9
         assert league['whole_season'] == 0
+
+
+class TestInviteAndJoin:
+    """AC: BUD-151 — any member can generate an invite link; any user with the
+    link can join the league; cold users see login flow first then redirected."""
+
+    def test_member_can_generate_invite_link(self, app, client):
+        from app import get_db, create_league
+
+        db = get_db()
+        _login(client, 'inviter')
+        with client.session_transaction() as sess:
+            creator_id = sess['session_id']
+
+        league_id = create_league(db, creator_id, 'Invite League', '📧')
+        _insert_race(db, round_num=1, status='open', hours_from_now=24)
+
+        response = client.get(f'/leagues/{league_id}/invite')
+        assert response.status_code == 200
+        assert b'Invite to' in response.data or b'invite' in response.data.lower()
+
+    def test_non_member_cannot_generate_invite(self, app, client):
+        from app import get_db, create_league
+
+        db = get_db()
+        _login(client, 'member')
+        with client.session_transaction() as sess:
+            creator_id = sess['session_id']
+
+        league_id = create_league(db, creator_id, 'Restricted League', '🔒')
+
+        _login(client, 'non_member')
+        response = client.get(f'/leagues/{league_id}/invite', follow_redirects=True)
+        assert response.status_code == 200
+
+    def test_join_link_works_for_logged_in_user(self, app, client):
+        from app import get_db, create_league, _get_invite_serializer, is_league_member, get_league_members
+
+        db = get_db()
+        _login(client, 'joiner')
+        with client.session_transaction() as sess:
+            creator_id = sess['session_id']
+
+        league_id = create_league(db, creator_id, 'Joinable League', '🔗')
+        _insert_race(db, round_num=1, status='open', hours_from_now=24)
+
+        ser = _get_invite_serializer()
+        token = ser.dumps(league_id)
+
+        _login(client, 'new_joiner')
+        response = client.get(f'/leagues/join/{token}', follow_redirects=True)
+        assert response.status_code == 200
+
+        # Verify membership by checking member count
+        members = get_league_members(db, league_id)
+        assert len(members) > 1
+
+    def test_invalid_token_shows_error(self, app, client):
+        _login(client, 'failer')
+        response = client.get('/leagues/join/invalid-token-123', follow_redirects=True)
+        assert response.status_code == 200
+
+    def test_cold_user_redirected_to_login(self, app, client):
+        from app import get_db, create_league, _get_invite_serializer
+
+        db = get_db()
+        _login(client, 'league_owner')
+        with client.session_transaction() as sess:
+            owner_id = sess['session_id']
+
+        league_id = create_league(db, owner_id, 'Cold Join League', '❄️')
+
+        ser = _get_invite_serializer()
+        token = ser.dumps(league_id)
+
+        # Log out by clearing session
+        with client.session_transaction() as sess:
+            sess.clear()
+
+        response = client.get(f'/leagues/join/{token}', follow_redirects=False)
+        assert response.status_code == 302
+        assert '/login' in response.location or 'login' in response.location

@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block title %}Invite - {{ league['name'] }} - F1 Predictor{% endblock %}
+
+{% block content %}
+<div class="card" style="text-align: center;">
+    <h2>🔗 Invite to {{ league['emoji_or_color'] }} {{ league['name'] }}</h2>
+    <p>Share this link with anyone you want to join your league.</p>
+    <input type="text" id="invite-url" value="{{ invite_url }}" readonly style="width: 100%; margin: 20px 0;" onclick="this.select();">
+    <p>
+        <button class="btn" onclick="copyInvite()">Copy link</button>
+        <a href="{{ url_for('league_detail', league_id=league_id) }}" class="btn btn-secondary">Back to league</a>
+    </p>
+    <p style="opacity: 0.6; font-size: 14px;">This link is valid for {{ invite_max_age_days }} days and can be used by one person.</p>
+</div>
+
+<script>
+function copyInvite() {
+    var el = document.getElementById('invite-url');
+    el.select();
+    document.execCommand('copy');
+    el.setSelectionRange(0, 0);
+    alert('Invite link copied!');
+}
+</script>
+{% endblock %}
