@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+
+{% block title %}Privacy Policy - F1 Predictor{% endblock %}
+
+{% block content %}
+<div class="card" style="margin-top: 30px;">
+    <h1>Privacy Policy</h1>
+    <p style="opacity: 0.8; margin: 15px 0;">
+        This is a placeholder privacy policy page. The full policy is being
+        prepared under BUD-147.
+    </p>
+    <p style="opacity: 0.8; margin: 15px 0;">
+        In the meantime: we only store the data needed to run the prediction
+        game (your display name, email if provided, predictions, and scores).
+        You can export or delete your account and all associated data from the
+        <a href="{{ url_for('account') }}">/account</a> page.
+    </p>
+</div>
+{% endblock %}

@@ -9,6 +9,7 @@ Votes lock when the race starts. Results are user-triggered via a button with br
 
 import os
 import uuid
+import json
 import secrets
 import sqlite3
 import requests
@@ -163,6 +164,9 @@ def _parse_race_datetime(date_str):
 def _now_utc():
     return datetime.now(timezone.utc)
 
+# Number of days a soft-deleted account stays recoverable before it is purged.
+ACCOUNT_DELETION_GRACE_DAYS = 7
+
 def compute_race_status(race, has_results):
     """
     Compute race status from race start time and results.
@@ -200,7 +204,9 @@ def init_db():
             display_name TEXT,
             avatar_emoji TEXT,
             favorite_driver_id INTEGER REFERENCES drivers(id),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            deleted_at TIMESTAMP,
+            deleted_email TEXT
         )
     ''')
 
@@ -416,6 +422,14 @@ def _apply_migrations(db):
         # validates the id exists in drivers before writing it.
         db.execute('ALTER TABLE users ADD COLUMN favorite_driver_id INTEGER')
         app.logger.info('Migration: users.favorite_driver_id added')
+
+    if 'deleted_at' not in users:
+        db.execute('ALTER TABLE users ADD COLUMN deleted_at TIMESTAMP')
+        app.logger.info('Migration: users.deleted_at added')
+
+    if 'deleted_email' not in users:
+        db.execute('ALTER TABLE users ADD COLUMN deleted_email TEXT')
+        app.logger.info('Migration: users.deleted_email added')
 
 # --- API fetching ---
 
@@ -1009,7 +1023,8 @@ def get_current_user():
 
     db = get_db()
     user = db.execute(
-        'SELECT * FROM users WHERE session_id = ?', (session_id,)
+        'SELECT * FROM users WHERE session_id = ? AND deleted_at IS NULL',
+        (session_id,)
     ).fetchone()
     return user
 
@@ -1017,6 +1032,36 @@ def get_current_user():
 def _normalize_email(email):
     """Normalize email for storage and lookup."""
     return (email or '').strip().lower()
+
+
+def _find_user_by_email(db, email):
+    """Find a non-deleted user by normalized email."""
+    return db.execute(
+        'SELECT * FROM users WHERE email = ? AND deleted_at IS NULL',
+        (email,)
+    ).fetchone()
+
+
+def _find_user_by_session_id(db, session_id):
+    """Find a non-deleted user by session id."""
+    return db.execute(
+        'SELECT * FROM users WHERE session_id = ? AND deleted_at IS NULL',
+        (session_id,)
+    ).fetchone()
+
+
+def _find_any_user_by_email(db, email):
+    """Find a user by normalized email, including soft-deleted accounts."""
+    return db.execute(
+        'SELECT * FROM users WHERE email = ?', (email,)
+    ).fetchone()
+
+
+def _find_any_user_by_session_id(db, session_id):
+    """Find a user by session id, including soft-deleted accounts."""
+    return db.execute(
+        'SELECT * FROM users WHERE session_id = ?', (session_id,)
+    ).fetchone()
 
 
 def _generate_login_token():
@@ -1068,7 +1113,8 @@ def _get_token_record(db, token):
 def _find_user_by_email(db, email):
     """Fetch user by normalized email."""
     return db.execute(
-        'SELECT * FROM users WHERE email = ?', (_normalize_email(email),)
+        'SELECT * FROM users WHERE email = ? AND deleted_at IS NULL',
+        (_normalize_email(email),)
     ).fetchone()
 
 
@@ -1094,6 +1140,14 @@ def bind_email_to_session(email):
     If a user with this email already exists, their session_id becomes the
     current session. Otherwise a new user is created (or the current anonymous
     user is upgraded when possible) and the email is bound to it.
+
+    If the email belongs to a soft-deleted account still within its grace
+    window, the account is transparently recovered instead of creating a
+    duplicate. If the grace window has passed, the stale account (and any
+    others past their window) is purged so the email can be reused.
+
+    Returns (session_id, recovered) where `recovered` is True if this call
+    restored a previously soft-deleted account.
     """
     db = get_db()
     normalized = _normalize_email(email)
@@ -1101,7 +1155,20 @@ def bind_email_to_session(email):
 
     if existing:
         session['session_id'] = existing['session_id']
-        return existing['session_id']
+        return existing['session_id'], False
+
+    deleted_user = db.execute(
+        'SELECT * FROM users WHERE email = ? AND deleted_at IS NOT NULL',
+        (normalized,)
+    ).fetchone()
+    if deleted_user:
+        if recover_user_account(db, deleted_user['session_id']):
+            session['session_id'] = deleted_user['session_id']
+            session.permanent = True
+            return deleted_user['session_id'], True
+        # Grace window has passed; purge stale soft-deleted accounts so the
+        # email is freed up, then fall through to create a fresh account.
+        purge_deleted_accounts(db)
 
     current_session_id = session.get('session_id')
     current_user = None
@@ -1118,7 +1185,7 @@ def bind_email_to_session(email):
                 (normalized, current_session_id)
             )
             db.commit()
-            return current_session_id
+            return current_session_id, False
         except sqlite3.IntegrityError:
             # Race: another session claimed the email; fall through to create new.
             pass
@@ -1143,7 +1210,7 @@ def bind_email_to_session(email):
 
     session['session_id'] = new_session_id
     session.permanent = True
-    return new_session_id
+    return new_session_id, False
 
 
 def _get_google_oauth_redirect_uri():
@@ -2078,8 +2145,11 @@ def login_verify(token):
         flash('That login link is invalid or has expired.', 'error')
         return redirect(url_for('login'))
 
-    bind_email_to_session(email)
-    flash('You are now logged in.', 'success')
+    _, recovered = bind_email_to_session(email)
+    if recovered:
+        flash('Welcome back! Your account was restored from deletion.', 'success')
+    else:
+        flash('You are now logged in.', 'success')
     return redirect(url_for('home'))
 
 
@@ -2130,9 +2200,12 @@ def login_oauth_google_callback():
         flash('Please use a Google account with a verified email.', 'error')
         return redirect(url_for('login'))
 
-    bind_email_to_session(email)
+    _, recovered = bind_email_to_session(email)
     session.permanent = True
-    flash('You are now logged in with Google.', 'success')
+    if recovered:
+        flash('Welcome back! Your account was restored from deletion.', 'success')
+    else:
+        flash('You are now logged in with Google.', 'success')
     return redirect(url_for('home'))
 
 
@@ -2140,6 +2213,234 @@ def login_oauth_google_callback():
 def logout():
     """Clear session."""
     session.clear()
+    return redirect(url_for('index'))
+
+
+def collect_user_export_data(db, user):
+    """Build the exportable data dict for a user: profile, predictions, scores.
+
+    Shared by the /account/export route and the `flask export-user` CLI
+    command so both produce the exact same shape.
+    """
+    session_id = user['session_id']
+
+    predictions = db.execute('''
+        SELECT p.race_id, r.name AS race_name, r.round,
+               p.p1_driver_id, p.p2_driver_id, p.p3_driver_id,
+               d1.name AS p1_name, d2.name AS p2_name, d3.name AS p3_name,
+               p.created_at
+        FROM predictions p
+        JOIN races r ON p.race_id = r.id
+        JOIN drivers d1 ON p.p1_driver_id = d1.id
+        JOIN drivers d2 ON p.p2_driver_id = d2.id
+        JOIN drivers d3 ON p.p3_driver_id = d3.id
+        WHERE p.user_id = ?
+        ORDER BY r.round
+    ''', (session_id,)).fetchall()
+
+    scores = db.execute('''
+        SELECT s.race_id, r.name AS race_name, r.round, s.points
+        FROM scores s
+        JOIN races r ON s.race_id = r.id
+        WHERE s.user_id = ?
+        ORDER BY r.round
+    ''', (session_id,)).fetchall()
+
+    login_tokens = db.execute('''
+        SELECT token, used, created_at, expires_at
+        FROM login_tokens
+        WHERE email = ?
+        ORDER BY created_at
+    ''', (user['email'],)).fetchall() if user['email'] else []
+
+    return {
+        'profile': {
+            'session_id': session_id,
+            'username': user['username'],
+            'email': user['email'],
+            'legacy_user': bool(user['legacy_user']),
+            'created_at': user['created_at'],
+        },
+        'predictions': [dict(row) for row in predictions],
+        'scores': [dict(row) for row in scores],
+        'auth_records': {
+            'login_tokens': [dict(row) for row in login_tokens],
+        },
+        'exported_at': _now_utc().isoformat(),
+    }
+
+
+def soft_delete_user_account(db, session_id):
+    """Mark a user as deleted; they can recover within the grace window.
+
+    The account is hidden from normal lookups (via `deleted_at IS NULL`)
+    immediately, but profile/predictions/scores are retained until purge.
+    Login tokens for the user's email are revoked so the account cannot be
+    re-entered while soft-deleted.
+
+    Returns True if a user was soft-deleted, False if session_id matched none
+    or the account was already soft-deleted.
+    """
+    user = db.execute(
+        'SELECT * FROM users WHERE session_id = ? AND deleted_at IS NULL',
+        (session_id,)
+    ).fetchone()
+    if not user:
+        return False
+
+    email = user['email']
+    db.execute(
+        '''UPDATE users
+           SET deleted_at = CURRENT_TIMESTAMP,
+               deleted_email = ?
+         WHERE session_id = ?''',
+        (email, session_id)
+    )
+    if email:
+        db.execute('DELETE FROM login_tokens WHERE email = ?', (email,))
+    db.commit()
+    return True
+
+
+def purge_deleted_accounts(db, grace_days=ACCOUNT_DELETION_GRACE_DAYS):
+    """Permanently remove accounts whose soft-delete grace window has passed.
+
+    Cascades to predictions, scores, league memberships, and any leagues the
+    user administered. Returns the number of accounts purged.
+    """
+    cutoff = (_now_utc() - timedelta(days=grace_days)).strftime('%Y-%m-%d %H:%M:%S')
+    expired = db.execute(
+        'SELECT * FROM users WHERE deleted_at IS NOT NULL AND deleted_at <= ?',
+        (cutoff,)
+    ).fetchall()
+
+    for user in expired:
+        sid = user['session_id']
+        db.execute('DELETE FROM league_members WHERE user_id = ?', (sid,))
+        db.execute('DELETE FROM leagues WHERE admin_user_id = ?', (sid,))
+        db.execute('DELETE FROM scores WHERE user_id = ?', (sid,))
+        db.execute('DELETE FROM predictions WHERE user_id = ?', (sid,))
+        db.execute('DELETE FROM users WHERE session_id = ?', (sid,))
+
+    db.commit()
+    return len(expired)
+
+
+def recover_user_account(db, session_id):
+    """Restore a soft-deleted account within the grace window.
+
+    Reinstates the original email so the user can log back in. Returns True
+    if an account was recovered, False if none matched or the grace window
+    has expired.
+    """
+    user = db.execute(
+        'SELECT * FROM users WHERE session_id = ? AND deleted_at IS NOT NULL',
+        (session_id,)
+    ).fetchone()
+    if not user:
+        return False
+
+    grace_cutoff = _now_utc() - timedelta(days=ACCOUNT_DELETION_GRACE_DAYS)
+    deleted_at = _parse_race_datetime(user['deleted_at'])
+    if deleted_at and deleted_at < grace_cutoff:
+        return False
+
+    db.execute(
+        '''UPDATE users
+           SET deleted_at = NULL,
+               email = COALESCE(email, deleted_email),
+               deleted_email = NULL
+         WHERE session_id = ?''',
+        (session_id,)
+    )
+    db.commit()
+    return True
+
+
+def delete_user_account(db, session_id):
+    """Hard-delete a user and every row that references their user id.
+
+    Deletes scores and predictions (both keyed on user_id), plus any
+    pending login tokens for the user's email, then the users row itself.
+    All in one transaction so a mid-way failure cannot leave orphaned rows.
+    Works regardless of account state (email-only, OAuth-linked, or
+    migrated-legacy) since all three key off the same `session_id` / users
+    row.
+
+    Any future table that adds its own user_id foreign key needs a
+    matching DELETE added here to keep this the single "delete a user and
+    their data" code path.
+
+    Returns True if a user was deleted, False if session_id matched none.
+    """
+    user = db.execute('SELECT * FROM users WHERE session_id = ?', (session_id,)).fetchone()
+    if not user:
+        return False
+
+    email = user['email']
+
+    db.execute('DELETE FROM league_members WHERE user_id = ?', (session_id,))
+    db.execute('DELETE FROM leagues WHERE admin_user_id = ?', (session_id,))
+    db.execute('DELETE FROM scores WHERE user_id = ?', (session_id,))
+    db.execute('DELETE FROM predictions WHERE user_id = ?', (session_id,))
+    if email:
+        db.execute('DELETE FROM login_tokens WHERE email = ?', (email,))
+    db.execute('DELETE FROM users WHERE session_id = ?', (session_id,))
+    db.commit()
+    return True
+
+
+@app.route('/account')
+@app.route('/settings')
+def account():
+    """Account page: data export and self-serve account deletion."""
+    user = get_current_user()
+    if not user:
+        flash('Please log in to view your account.', 'error')
+        return redirect(url_for('login'))
+    return render_template('account.html', user=user, grace_days=ACCOUNT_DELETION_GRACE_DAYS)
+
+
+@app.route('/account/export')
+def account_export():
+    """Download the current user's data (profile, predictions, scores) as JSON."""
+    user = get_current_user()
+    if not user:
+        flash('Please log in to export your data.', 'error')
+        return redirect(url_for('login'))
+
+    db = get_db()
+    data = collect_user_export_data(db, user)
+    response = jsonify(data)
+    response.headers['Content-Disposition'] = (
+        f'attachment; filename="f1-predictor-export-{user["username"]}.json"'
+    )
+    return response
+
+
+@app.route('/account/delete', methods=['POST'])
+def account_delete():
+    """Self-serve account deletion. Soft-deletes with a recovery grace window."""
+    user = get_current_user()
+    if not user:
+        flash('Please log in to delete your account.', 'error')
+        return redirect(url_for('login'))
+
+    confirm = (request.form.get('confirm') or '').strip().lower()
+    expected = (user['email'] or user['username'] or '').strip().lower()
+    if not confirm or confirm != expected:
+        flash('Confirmation did not match your username/email. Account was not deleted.', 'error')
+        return redirect(url_for('account'))
+
+    db = get_db()
+    soft_delete_user_account(db, user['session_id'])
+    session.clear()
+    flash(
+        f'Your account has been deleted. You have {ACCOUNT_DELETION_GRACE_DAYS} '
+        'days to change your mind — log back in during that window and your '
+        'account will be automatically restored. After that it is permanently removed.',
+        'success'
+    )
     return redirect(url_for('index'))
 
 
@@ -2171,6 +2472,13 @@ def debug_magic_link(email):
         'link': _login_token_url(token),
         'expires_at': row['expires_at'],
     })
+
+
+
+@app.route('/privacy')
+def privacy():
+    """Privacy policy stub (BUD-147 will provide full content)."""
+    return render_template('privacy.html')
 
 
 @app.route('/migrate', methods=['GET'])
@@ -2561,6 +2869,27 @@ def cli_send_migration_email(email):
     create_login_token(email)
     click.echo(f'Migration magic link created for {normalized}.')
     click.echo('Check application logs or /debug/magic-link for the link.')
+
+
+@app.cli.command('export-user')
+@click.argument('identifier')
+def cli_export_user(identifier):
+    """Admin: print a user's data (profile, predictions, scores) as JSON.
+
+    IDENTIFIER may be a session_id, username, or email. Uses the same
+    export helper as the self-serve /account/export route.
+    """
+    db = get_db()
+    user = db.execute('SELECT * FROM users WHERE session_id = ?', (identifier,)).fetchone()
+    if not user:
+        user = db.execute('SELECT * FROM users WHERE username = ?', (identifier,)).fetchone()
+    if not user:
+        user = db.execute('SELECT * FROM users WHERE email = ?', (_normalize_email(identifier),)).fetchone()
+    if not user:
+        raise click.ClickException(f'No user found matching "{identifier}"')
+
+    data = collect_user_export_data(db, user)
+    click.echo(json.dumps(data, indent=2, default=str))
 
 
 # Initialize database on startup
