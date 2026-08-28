@@ -172,12 +172,19 @@ def _ensure_predictions(
     driver_ids: list[int],
     seed: int,
     use_personas: bool = False,
+    telegram_config=None,
 ) -> None:
-    """Generate deterministic synthetic predictions through the live schema."""
-    from personas import RaceContext, generate_persona_prediction
+    """Generate deterministic synthetic predictions through the live schema.
+
+    When ``telegram_config`` is provided and ``use_personas`` is True, each
+    persona prediction is emitted to the configured Telegram group chat as it
+    is generated (F1-115).
+    """
+    from personas import PERSONAS_BY_SLUG, RaceContext, generate_persona_prediction
 
     if use_personas:
         drivers = _all_drivers(db)
+        driver_names = {d["id"]: d["name"] for d in drivers}
 
     rng = random.Random(seed)
     for race in races:
@@ -189,7 +196,9 @@ def _ensure_predictions(
                 date=race["date"],
                 drivers=tuple(drivers),
             )
-        for user_id, _username, persona in users:
+
+        race_predictions: list[tuple[str, str, str, str, str]] = []
+        for user_id, username, persona in users:
             existing = db.execute(
                 "SELECT 1 FROM predictions WHERE user_id = ? AND race_id = ?",
                 (user_id, race["id"]),
@@ -207,6 +216,25 @@ def _ensure_predictions(
             """,
                 (user_id, race["id"], p1, p2, p3),
             )
+            if use_personas:
+                persona_name = PERSONAS_BY_SLUG[persona].name
+                race_predictions.append(
+                    (
+                        persona_name,
+                        username,
+                        driver_names.get(p1, "Unknown"),
+                        driver_names.get(p2, "Unknown"),
+                        driver_names.get(p3, "Unknown"),
+                    )
+                )
+
+        if use_personas and telegram_config is not None and race_predictions:
+            from telegram_group import send_persona_predictions
+
+            try:
+                send_persona_predictions(telegram_config, race["name"], race_predictions)
+            except Exception as e:
+                print(f"warning: Telegram group post failed for {race['name']}: {e}", file=sys.stderr)
     db.commit()
 
 
@@ -303,6 +331,7 @@ def run_replay(
     user_count: int = DEFAULT_SYNTHETIC_USER_COUNT,
     persona_slug: str | None = None,
     mixed_personas: bool = False,
+    telegram_config=None,
 ) -> dict:
     """Run the full replay and return result metadata.
 
@@ -314,6 +343,9 @@ def run_replay(
       * ``mixed_personas`` cycles through all seven archetypes.
       * If neither is set, the legacy random-picker strategy is used and the
         deterministic seed behaviour from BUD-132 is preserved exactly.
+
+    When ``telegram_config`` is provided and personas are enabled, each race's
+    predictions are posted to Telegram as they are generated (F1-115).
     """
     from personas import assign_personas, list_persona_slugs
 
@@ -343,7 +375,15 @@ def run_replay(
             personas = assign_personas(user_count, mixed=mixed_personas, persona_slug=persona_slug)
 
         users = _create_synthetic_users(db, season, seed, user_count, personas=personas)
-        _ensure_predictions(db, users, races, driver_ids, seed, use_personas=use_personas)
+        _ensure_predictions(
+            db,
+            users,
+            races,
+            driver_ids,
+            seed,
+            use_personas=use_personas,
+            telegram_config=telegram_config,
+        )
         _calculate_and_insert_scores(db, users, races)
         counts_after = _snapshot_counts(db)
         leaderboard = _leaderboard(db, season, (u[0] for u in users))
@@ -400,6 +440,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Cycle through all persona archetypes across synthetic users",
     )
+    parser.add_argument(
+        "--telegram",
+        action="store_true",
+        help="Post persona predictions to the Telegram group configured by F1_PERSONA_CHAT_ID (F1-115)",
+    )
     args = parser.parse_args(argv)
 
     if args.db:
@@ -430,11 +475,22 @@ def main(argv: list[str] | None = None) -> int:
         print("error: --persona and --mixed-personas are mutually exclusive", file=sys.stderr)
         return 1
 
+    telegram_config = None
+    if args.telegram:
+        from telegram_group import TelegramConfig
+
+        try:
+            telegram_config = TelegramConfig.from_env()
+        except Exception as e:
+            print(f"error: cannot configure Telegram: {e}", file=sys.stderr)
+            return 1
+
     result = run_replay(
         args.season,
         args.seed,
         persona_slug=args.persona,
         mixed_personas=args.mixed_personas,
+        telegram_config=telegram_config,
     )
     print(_format_leaderboard(result["leaderboard"]))
     return 0
