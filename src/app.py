@@ -1808,16 +1808,21 @@ def league_join(token):
         flash('Invalid or expired invite link', 'error')
         return redirect(url_for('index'))
 
-    user = get_current_user()
-    if not user:
-        session['join_league_token'] = token
-        return redirect(url_for('login'))
-
     db = get_db()
     league = db.execute('SELECT * FROM leagues WHERE id = ?', (league_id,)).fetchone()
     if not league:
         flash('League not found', 'error')
         return redirect(url_for('index'))
+
+    user = get_current_user()
+    if not user:
+        # Cold user: show league info without a login wall (AC #2).
+        members = get_league_members(db, league_id)
+        session['join_league_token'] = token
+        return render_template('league_join_cold.html',
+                               league=league,
+                               members=members,
+                               token=token)
 
     if is_league_member(db, league_id, user['session_id']):
         flash('You are already a member of this league', 'info')
@@ -2148,6 +2153,9 @@ def login_verify(token):
 
     bind_email_to_session(email)
     flash('You are now logged in.', 'success')
+    pending_token = session.pop('join_league_token', None)
+    if pending_token:
+        return redirect(url_for('league_join', token=pending_token))
     return redirect(url_for('home'))
 
 

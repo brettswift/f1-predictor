@@ -344,6 +344,71 @@ class TestInviteAndJoin:
         with client.session_transaction() as sess:
             sess.clear()
 
-        response = client.get(f'/leagues/join/{token}', follow_redirects=False)
-        assert response.status_code == 302
-        assert '/login' in response.location or 'login' in response.location
+        response = client.get(f'/leagues/join/{token}')
+        assert response.status_code == 200
+        assert b'league' in response.data.lower() or b'invited' in response.data.lower()
+
+    def test_duplicate_accept_only_adds_once(self, app, client):
+        from app import get_db, create_league, _get_invite_serializer, get_league_members
+
+        db = get_db()
+        _login(client, 'creator')
+        with client.session_transaction() as sess:
+            creator_id = sess['session_id']
+
+        league_id = create_league(db, creator_id, 'Dedup League', '🔁')
+        _insert_race(db, round_num=1, status='open', hours_from_now=24)
+
+        ser = _get_invite_serializer()
+        token = ser.dumps(league_id)
+
+        _login(client, 'joiner')
+        with client.session_transaction() as sess:
+            joiner_id = sess['session_id']
+
+        # Accept twice
+        client.get(f'/leagues/join/{token}', follow_redirects=True)
+        client.get(f'/leagues/join/{token}', follow_redirects=True)
+
+        members = get_league_members(db, league_id)
+        rows_for_joiner = [m for m in members if m['user_id'] == joiner_id]
+        assert len(rows_for_joiner) == 1
+
+    def test_view_no_accept_account_still_works(self, app, client):
+        from app import get_db, create_league, _get_invite_serializer
+
+        db = get_db()
+        _login(client, 'creator_vna')
+        with client.session_transaction() as sess:
+            creator_id = sess['session_id']
+        league_id = create_league(db, creator_id, 'ViewOnly League', '👀')
+        _insert_race(db, round_num=1, status='open', hours_from_now=24)
+        ser = _get_invite_serializer()
+        token = ser.dumps(league_id)
+
+        # Cold user views but never accepts - just loads the page
+        with client.session_transaction() as sess:
+            sess.clear()
+        response = client.get(f'/leagues/join/{token}')
+        assert response.status_code == 200
+
+    def test_token_scoped_to_one_league(self, app, client):
+        from app import get_db, create_league, _get_invite_serializer, get_league_members
+
+        db = get_db()
+        _login(client, 'multi_creator')
+        with client.session_transaction() as sess:
+            creator_id = sess['session_id']
+
+        lid1 = create_league(db, creator_id, 'Scoped League A', '🔴')
+        lid2 = create_league(db, creator_id, 'Scoped League B', '🔵')
+        _insert_race(db, round_num=1, status='open', hours_from_now=24)
+
+        ser = _get_invite_serializer()
+        token1 = ser.dumps(lid1)
+
+        _login(client, 'scoped_joiner')
+        client.get(f'/leagues/join/{token1}', follow_redirects=True)
+
+        members_b = get_league_members(db, lid2)
+        assert len(members_b) == 1  # only the creator
