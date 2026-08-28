@@ -27,12 +27,14 @@
 <div class="card" style="margin-top: 20px; border: 1px solid rgba(225, 6, 0, 0.4);">
     <h2>Delete your account</h2>
     <p style="opacity: 0.8; margin: 15px 0;">
-        This permanently deletes your account, all of your predictions, and
-        all of your scores. This <strong>cannot be undone</strong>. Consider
-        exporting your data first.
+        This deletes your account, all of your predictions, and all of your
+        scores. You'll have <strong>{{ grace_days }} days</strong> to change
+        your mind — logging back in during that window automatically restores
+        your account. After {{ grace_days }} days it is permanently removed.
+        Consider exporting your data first.
     </p>
     <form method="POST" action="{{ url_for('account_delete') }}"
-          onsubmit="return confirm('Delete your account and all your data? This cannot be undone.');"
+          onsubmit="return confirm('Delete your account? You will have {{ grace_days }} days to recover it by logging back in.');"
           style="max-width: 400px;">
         <label for="confirm" style="display: block; margin-bottom: 8px;">
             Type your {{ 'email' if user['email'] else 'username' }}
@@ -41,11 +43,12 @@
         <input type="text" id="confirm" name="confirm" required autocomplete="off"
                placeholder="{{ user['email'] or user['username'] }}">
         <button type="submit" class="btn" style="background: #e10600; width: 100%; margin-top: 10px;">
-            Permanently delete my account
+            Delete my account
         </button>
     </form>
     <p style="opacity: 0.6; margin-top: 12px; font-size: 13px;">
-        Your data will be removed immediately.
+        Your account will be deactivated immediately and permanently removed
+        after the {{ grace_days }}-day recovery window.
     </p>
 </div>
 

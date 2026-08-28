@@ -1140,6 +1140,14 @@ def bind_email_to_session(email):
     If a user with this email already exists, their session_id becomes the
     current session. Otherwise a new user is created (or the current anonymous
     user is upgraded when possible) and the email is bound to it.
+
+    If the email belongs to a soft-deleted account still within its grace
+    window, the account is transparently recovered instead of creating a
+    duplicate. If the grace window has passed, the stale account (and any
+    others past their window) is purged so the email can be reused.
+
+    Returns (session_id, recovered) where `recovered` is True if this call
+    restored a previously soft-deleted account.
     """
     db = get_db()
     normalized = _normalize_email(email)
@@ -1147,7 +1155,20 @@ def bind_email_to_session(email):
 
     if existing:
         session['session_id'] = existing['session_id']
-        return existing['session_id']
+        return existing['session_id'], False
+
+    deleted_user = db.execute(
+        'SELECT * FROM users WHERE email = ? AND deleted_at IS NOT NULL',
+        (normalized,)
+    ).fetchone()
+    if deleted_user:
+        if recover_user_account(db, deleted_user['session_id']):
+            session['session_id'] = deleted_user['session_id']
+            session.permanent = True
+            return deleted_user['session_id'], True
+        # Grace window has passed; purge stale soft-deleted accounts so the
+        # email is freed up, then fall through to create a fresh account.
+        purge_deleted_accounts(db)
 
     current_session_id = session.get('session_id')
     current_user = None
@@ -1164,7 +1185,7 @@ def bind_email_to_session(email):
                 (normalized, current_session_id)
             )
             db.commit()
-            return current_session_id
+            return current_session_id, False
         except sqlite3.IntegrityError:
             # Race: another session claimed the email; fall through to create new.
             pass
@@ -1189,7 +1210,7 @@ def bind_email_to_session(email):
 
     session['session_id'] = new_session_id
     session.permanent = True
-    return new_session_id
+    return new_session_id, False
 
 
 def _get_google_oauth_redirect_uri():
@@ -2124,8 +2145,11 @@ def login_verify(token):
         flash('That login link is invalid or has expired.', 'error')
         return redirect(url_for('login'))
 
-    bind_email_to_session(email)
-    flash('You are now logged in.', 'success')
+    _, recovered = bind_email_to_session(email)
+    if recovered:
+        flash('Welcome back! Your account was restored from deletion.', 'success')
+    else:
+        flash('You are now logged in.', 'success')
     return redirect(url_for('home'))
 
 
@@ -2176,9 +2200,12 @@ def login_oauth_google_callback():
         flash('Please use a Google account with a verified email.', 'error')
         return redirect(url_for('login'))
 
-    bind_email_to_session(email)
+    _, recovered = bind_email_to_session(email)
     session.permanent = True
-    flash('You are now logged in with Google.', 'success')
+    if recovered:
+        flash('Welcome back! Your account was restored from deletion.', 'success')
+    else:
+        flash('You are now logged in with Google.', 'success')
     return redirect(url_for('home'))
 
 
@@ -2371,7 +2398,7 @@ def account():
     if not user:
         flash('Please log in to view your account.', 'error')
         return redirect(url_for('login'))
-    return render_template('account.html', user=user)
+    return render_template('account.html', user=user, grace_days=ACCOUNT_DELETION_GRACE_DAYS)
 
 
 @app.route('/account/export')
@@ -2406,11 +2433,12 @@ def account_delete():
         return redirect(url_for('account'))
 
     db = get_db()
-    delete_user_account(db, user['session_id'])
+    soft_delete_user_account(db, user['session_id'])
     session.clear()
     flash(
-        'Your account and all associated data have been deleted. '
-        'This cannot be undone.',
+        f'Your account has been deleted. You have {ACCOUNT_DELETION_GRACE_DAYS} '
+        'days to change your mind — log back in during that window and your '
+        'account will be automatically restored. After that it is permanently removed.',
         'success'
     )
     return redirect(url_for('index'))

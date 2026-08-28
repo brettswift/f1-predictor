@@ -1,10 +1,17 @@
 """Unit tests for account deletion + data export (BUD-146 / F1-14).
 
 ACs:
-- Self-serve deletion from /account (and /settings) removes the users row
-  and every predictions/scores row for that user id.
+- Self-serve deletion from /account (and /settings) soft-deletes the account:
+  hidden from normal lookups immediately, but recoverable within the grace
+  window (profile/predictions/scores retained until purge).
+- `delete_user_account()` (hard delete) removes the users row and every
+  predictions/scores row for that user id — used as the underlying cascade
+  by `purge_deleted_accounts()`.
 - Deletion does not touch other users' rows.
 - Deletion requires a confirm step (re-typing username/email).
+- A soft-deleted account is automatically recovered if the owner logs back
+  in (magic link or Google OAuth) within the grace window; recovery fails
+  (and the account is eventually purged) once the window has passed.
 - Data export produces JSON with profile, predictions, and scores.
 - `flask export-user <id>` gives an admin the same export.
 - Works for any account state (anonymous/legacy, email, OAuth-linked —
@@ -169,8 +176,13 @@ class TestAccountDeleteRoute:
         assert response.status_code == 302
         assert db.execute('SELECT * FROM users WHERE session_id = ?', ('sess-route-1',)).fetchone() is not None
 
-    def test_correct_confirmation_deletes_and_clears_session(self, app, client):
-        """AC: typing the email/username exactly deletes the account."""
+    def test_correct_confirmation_soft_deletes_and_clears_session(self, app, client):
+        """AC: typing the email/username exactly soft-deletes the account.
+
+        The row and its predictions/scores are retained (recoverable) rather
+        than hard-deleted immediately; only the session and login tokens are
+        cleared right away.
+        """
         from app import get_db
 
         db = get_db()
@@ -178,9 +190,9 @@ class TestAccountDeleteRoute:
 
         response = client.post('/account/delete', data={'confirm': 'route2@example.com'}, follow_redirects=False)
         assert response.status_code == 302
-        assert db.execute('SELECT * FROM users WHERE session_id = ?', ('sess-route-2',)).fetchone() is None
-        assert db.execute('SELECT COUNT(*) c FROM predictions WHERE user_id = ?', ('sess-route-2',)).fetchone()['c'] == 0
-        assert db.execute('SELECT COUNT(*) c FROM scores WHERE user_id = ?', ('sess-route-2',)).fetchone()['c'] == 0
+        user = db.execute('SELECT * FROM users WHERE session_id = ?', ('sess-route-2',)).fetchone()
+        assert user is not None
+        assert user['deleted_at'] is not None
 
         with client.session_transaction() as sess:
             assert 'session_id' not in sess
@@ -194,7 +206,9 @@ class TestAccountDeleteRoute:
 
         response = client.post('/account/delete', data={'confirm': 'legacyroute'}, follow_redirects=False)
         assert response.status_code == 302
-        assert db.execute('SELECT * FROM users WHERE session_id = ?', ('sess-route-3',)).fetchone() is None
+        user = db.execute('SELECT * FROM users WHERE session_id = ?', ('sess-route-3',)).fetchone()
+        assert user is not None
+        assert user['deleted_at'] is not None
 
     def test_confirmation_is_case_insensitive(self, app, client):
         """Typing the email with different casing still confirms."""
@@ -205,9 +219,156 @@ class TestAccountDeleteRoute:
 
         response = client.post('/account/delete', data={'confirm': 'route4@example.com'}, follow_redirects=False)
         assert response.status_code == 302
-        assert db.execute('SELECT * FROM users WHERE session_id = ?', ('sess-route-4',)).fetchone() is None
-        assert db.execute('SELECT COUNT(*) c FROM predictions WHERE user_id = ?', ('sess-route-4',)).fetchone()['c'] == 0
-        assert db.execute('SELECT COUNT(*) c FROM scores WHERE user_id = ?', ('sess-route-4',)).fetchone()['c'] == 0
+        user = db.execute('SELECT * FROM users WHERE session_id = ?', ('sess-route-4',)).fetchone()
+        assert user is not None
+        assert user['deleted_at'] is not None
+
+    def test_soft_deleted_account_is_hidden_from_normal_lookup(self, app, client):
+        """A soft-deleted account can no longer log in or be treated as active."""
+        from app import get_db
+
+        db = get_db()
+        self._login_as(client, db, 'sess-route-5', 'routeuser5', email='route5@example.com')
+
+        client.post('/account/delete', data={'confirm': 'route5@example.com'})
+
+        # get_current_user filters on deleted_at IS NULL, so re-attaching the
+        # old session id must not resurrect the account.
+        with client.session_transaction() as sess:
+            sess['session_id'] = 'sess-route-5'
+        response = client.get('/account', follow_redirects=False)
+        assert response.status_code == 302
+        assert '/login' in response.headers['Location']
+
+
+class TestSoftDeleteAndRecovery:
+    """Tests for soft_delete_user_account / recover_user_account and the
+    login-time recovery mechanism wired into bind_email_to_session."""
+
+    def test_soft_delete_retains_predictions_and_scores(self, app, client):
+        """Soft-delete hides the account but keeps its data until purge."""
+        from app import get_db, soft_delete_user_account
+
+        db = get_db()
+        _seed_user_with_data(db, 'sess-soft-1', 'softuser1', email='soft1@example.com')
+
+        assert soft_delete_user_account(db, 'sess-soft-1') is True
+
+        row = db.execute('SELECT * FROM users WHERE session_id = ?', ('sess-soft-1',)).fetchone()
+        assert row is not None
+        assert row['deleted_at'] is not None
+        assert db.execute(
+            'SELECT COUNT(*) c FROM predictions WHERE user_id = ?', ('sess-soft-1',)
+        ).fetchone()['c'] == 1
+        assert db.execute(
+            'SELECT COUNT(*) c FROM scores WHERE user_id = ?', ('sess-soft-1',)
+        ).fetchone()['c'] == 1
+
+    def test_soft_delete_revokes_pending_login_tokens(self, app, client):
+        from app import get_db, soft_delete_user_account, create_login_token
+
+        db = get_db()
+        _seed_user_with_data(db, 'sess-soft-2', 'softuser2', email='soft2@example.com')
+        create_login_token('soft2@example.com')
+
+        soft_delete_user_account(db, 'sess-soft-2')
+
+        assert db.execute(
+            'SELECT COUNT(*) c FROM login_tokens WHERE email = ?', ('soft2@example.com',)
+        ).fetchone()['c'] == 0
+
+    def test_soft_delete_returns_false_when_already_deleted(self, app, client):
+        from app import get_db, soft_delete_user_account
+
+        db = get_db()
+        _seed_user_with_data(db, 'sess-soft-3', 'softuser3', email='soft3@example.com')
+        assert soft_delete_user_account(db, 'sess-soft-3') is True
+        assert soft_delete_user_account(db, 'sess-soft-3') is False
+
+    def test_recover_within_grace_window_restores_account(self, app, client):
+        from app import get_db, soft_delete_user_account, recover_user_account
+
+        db = get_db()
+        _seed_user_with_data(db, 'sess-rec-1', 'recuser1', email='rec1@example.com')
+        soft_delete_user_account(db, 'sess-rec-1')
+
+        assert recover_user_account(db, 'sess-rec-1') is True
+        row = db.execute('SELECT * FROM users WHERE session_id = ?', ('sess-rec-1',)).fetchone()
+        assert row['deleted_at'] is None
+        assert row['email'] == 'rec1@example.com'
+
+    def test_recover_after_grace_window_fails(self, app, client):
+        from app import get_db, soft_delete_user_account, recover_user_account
+
+        db = get_db()
+        _seed_user_with_data(db, 'sess-rec-2', 'recuser2', email='rec2@example.com')
+        soft_delete_user_account(db, 'sess-rec-2')
+        stale = (datetime.now(timezone.utc) - timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+        db.execute('UPDATE users SET deleted_at = ? WHERE session_id = ?', (stale, 'sess-rec-2'))
+        db.commit()
+
+        assert recover_user_account(db, 'sess-rec-2') is False
+        row = db.execute('SELECT * FROM users WHERE session_id = ?', ('sess-rec-2',)).fetchone()
+        assert row['deleted_at'] is not None
+
+    def test_magic_link_login_recovers_soft_deleted_account(self, app, client):
+        """End-to-end: delete via the route, then log back in with the same
+        email via magic link — the account and its data come back."""
+        from app import get_db
+
+        db = get_db()
+        self._login_and_delete(client, db, 'sess-recroute-1', 'recrouteuser', 'recroute@example.com')
+
+        client.post('/login/request', data={'email': 'recroute@example.com'})
+        token = db.execute(
+            'SELECT token FROM login_tokens WHERE email = ?', ('recroute@example.com',)
+        ).fetchone()['token']
+        response = client.get(f'/login/verify/{token}', follow_redirects=False)
+        assert response.status_code == 302
+
+        row = db.execute('SELECT * FROM users WHERE session_id = ?', ('sess-recroute-1',)).fetchone()
+        assert row is not None
+        assert row['deleted_at'] is None
+        with client.session_transaction() as sess:
+            assert sess['session_id'] == 'sess-recroute-1'
+
+    def test_magic_link_login_after_grace_window_creates_fresh_account(self, app, client):
+        """Once the grace window has passed, logging in with the same email
+        purges the stale account and creates a new one instead of recovering."""
+        from app import get_db
+
+        db = get_db()
+        self._login_and_delete(client, db, 'sess-recroute-2', 'expiredrouteuser', 'expiredroute@example.com')
+        stale = (datetime.now(timezone.utc) - timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+        db.execute('UPDATE users SET deleted_at = ? WHERE session_id = ?', (stale, 'sess-recroute-2'))
+        db.commit()
+
+        client.post('/login/request', data={'email': 'expiredroute@example.com'})
+        token = db.execute(
+            'SELECT token FROM login_tokens WHERE email = ?', ('expiredroute@example.com',)
+        ).fetchone()['token']
+        response = client.get(f'/login/verify/{token}', follow_redirects=False)
+        assert response.status_code == 302
+
+        assert db.execute(
+            'SELECT * FROM users WHERE session_id = ?', ('sess-recroute-2',)
+        ).fetchone() is None
+        new_row = db.execute(
+            'SELECT * FROM users WHERE email = ? AND deleted_at IS NULL', ('expiredroute@example.com',)
+        ).fetchone()
+        assert new_row is not None
+        assert new_row['session_id'] != 'sess-recroute-2'
+
+    def _login_and_delete(self, client, db, session_id, username, email):
+        """Log in as a fresh user and soft-delete them via the /account/delete route."""
+        db.execute(
+            'INSERT INTO users (session_id, username, email) VALUES (?, ?, ?)',
+            (session_id, username, email)
+        )
+        db.commit()
+        with client.session_transaction() as sess:
+            sess['session_id'] = session_id
+        client.post('/account/delete', data={'confirm': email})
 
 
 class TestAccountPage:
