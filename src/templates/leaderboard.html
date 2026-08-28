@@ -33,7 +33,7 @@
                     {% else %}{{ loop.index }}{% endif %}
                 </td>
                 <td>
-                    {{ user['username'] }}
+                    {{ avatar_for(user) }} {{ display_name_for(user) }}
                     {% if user['session_id'] == current_user['session_id'] %}
                         <span style="font-size: 12px; opacity: 0.6;">(you)</span>
                     {% endif %}
@@ -65,7 +65,7 @@
             <tbody>
                 {% for user in users %}
                 <tr {% if user['session_id'] == current_user['session_id'] %}style="background: rgba(225, 6, 0, 0.1);"{% endif %}>
-                    <td>{{ user['username'] }}</td>
+                    <td>{{ avatar_for(user) }} {{ display_name_for(user) }}</td>
                     {% for race in races %}
                     <td style="text-align: center;">
                         {{ score_matrix[user['session_id']][race['id']] }}

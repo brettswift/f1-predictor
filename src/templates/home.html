@@ -7,7 +7,7 @@
     <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px;">
         <div>
             <p style="opacity: 0.7; margin-bottom: 5px;">Welcome back,</p>
-            <h1 style="margin-bottom: 0;">{{ user['username'] }}</h1>
+            <h1 style="margin-bottom: 0;">{{ avatar_for(user) }} {{ display_name_for(user) }}</h1>
         </div>
         <div style="text-align: right;">
             <p style="opacity: 0.7; margin-bottom: 5px;">Total Score</p>

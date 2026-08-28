@@ -95,6 +95,45 @@ def inject_current_user():
     """Make the current user available to all templates as current_user."""
     return dict(current_user=get_current_user())
 
+
+# F1-13 / BUD-145: minimal profile (display name, avatar, favorite driver).
+DEFAULT_AVATAR_EMOJIS = ['🏎️', '🏁', '🚀', '⚡', '🔥', '🌟', '🎯', '🏆', '🛞', '🧊']
+
+
+def default_avatar_for(key):
+    """Deterministic default avatar emoji (simple identicon) derived from a stable key."""
+    if not key:
+        return DEFAULT_AVATAR_EMOJIS[0]
+    idx = sum(ord(c) for c in str(key)) % len(DEFAULT_AVATAR_EMOJIS)
+    return DEFAULT_AVATAR_EMOJIS[idx]
+
+
+def display_name_for(user):
+    """Return the user's display name, falling back to username. Never blank."""
+    if not user:
+        return ''
+    keys = user.keys()
+    name = user['display_name'] if 'display_name' in keys else None
+    return (name or user['username'])
+
+
+def avatar_for(user):
+    """Return the user's chosen avatar emoji, or a deterministic default."""
+    if not user:
+        return DEFAULT_AVATAR_EMOJIS[0]
+    keys = user.keys()
+    emoji = user['avatar_emoji'] if 'avatar_emoji' in keys else None
+    if emoji:
+        return emoji
+    key = user['session_id'] if 'session_id' in keys else user['user_id'] if 'user_id' in keys else None
+    return default_avatar_for(key)
+
+
+@app.context_processor
+def inject_profile_helpers():
+    """Expose profile display helpers (display name / avatar fallback) to all templates."""
+    return dict(display_name_for=display_name_for, avatar_for=avatar_for)
+
 # Database helpers
 def get_db():
     """Get database connection for current request."""
@@ -158,6 +197,9 @@ def init_db():
             persona TEXT,
             email TEXT UNIQUE,
             legacy_user INTEGER DEFAULT 0,
+            display_name TEXT,
+            avatar_emoji TEXT,
+            favorite_driver_id INTEGER REFERENCES drivers(id),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -361,6 +403,19 @@ def _apply_migrations(db):
     if 'persona' not in users:
         db.execute('ALTER TABLE users ADD COLUMN persona TEXT')
         app.logger.info('Migration: users.persona added')
+
+    # F1-13 / BUD-145: minimal profile fields.
+    if 'display_name' not in users:
+        db.execute('ALTER TABLE users ADD COLUMN display_name TEXT')
+        app.logger.info('Migration: users.display_name added')
+    if 'avatar_emoji' not in users:
+        db.execute('ALTER TABLE users ADD COLUMN avatar_emoji TEXT')
+        app.logger.info('Migration: users.avatar_emoji added')
+    if 'favorite_driver_id' not in users:
+        # No FK enforcement via ALTER (SQLite limitation); the /profile route
+        # validates the id exists in drivers before writing it.
+        db.execute('ALTER TABLE users ADD COLUMN favorite_driver_id INTEGER')
+        app.logger.info('Migration: users.favorite_driver_id added')
 
 # --- API fetching ---
 
@@ -1773,7 +1828,7 @@ def _race_detail_impl(race_id, db, user):
             result_ids = {'p1_driver_id': res['p1_driver_id'], 'p2_driver_id': res['p2_driver_id'], 'p3_driver_id': res['p3_driver_id']}
 
     predictions = db.execute('''
-        SELECT p.*, u.username,
+        SELECT p.*, u.username, u.display_name, u.avatar_emoji,
                d1.name as p1_name, d2.name as p2_name, d3.name as p3_name
         FROM predictions p
         JOIN users u ON p.user_id = u.session_id
@@ -2167,6 +2222,58 @@ def migrate_send():
 
     create_login_token(email)
     return render_template('migrate_sent.html', email=normalized)
+
+
+@app.route('/profile', methods=['GET', 'POST'])
+def profile():
+    """F1-13 / BUD-145: minimal profile settings.
+
+    Lets a logged-in user set a display name, pick an avatar emoji, and
+    choose a favorite driver. All three fields are optional; display name
+    falls back to username and avatar falls back to a deterministic default
+    (see display_name_for / avatar_for) whenever unset.
+    """
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+
+    db = get_db()
+
+    if request.method == 'POST':
+        display_name = request.form.get('display_name', '').strip()
+        avatar_emoji = request.form.get('avatar_emoji', '').strip()
+        favorite_driver_id = request.form.get('favorite_driver_id', '').strip()
+
+        if avatar_emoji and avatar_emoji not in DEFAULT_AVATAR_EMOJIS:
+            flash('Please choose an avatar from the provided options.', 'error')
+            return redirect(url_for('profile'))
+
+        driver_id_value = None
+        if favorite_driver_id:
+            driver = db.execute(
+                'SELECT id FROM drivers WHERE id = ?', (favorite_driver_id,)
+            ).fetchone()
+            if not driver:
+                flash('Please choose a valid favorite driver.', 'error')
+                return redirect(url_for('profile'))
+            driver_id_value = driver['id']
+
+        db.execute('''
+            UPDATE users
+            SET display_name = ?, avatar_emoji = ?, favorite_driver_id = ?
+            WHERE session_id = ?
+        ''', (display_name or None, avatar_emoji or None, driver_id_value, user['session_id']))
+        db.commit()
+        flash('Profile updated.', 'success')
+        return redirect(url_for('profile'))
+
+    drivers = db.execute('SELECT * FROM drivers ORDER BY name').fetchall()
+    return render_template(
+        'profile.html',
+        user=user,
+        drivers=drivers,
+        avatar_choices=DEFAULT_AVATAR_EMOJIS,
+    )
 
 
 @app.route('/admin/legacy-users', methods=['GET', 'POST'])
