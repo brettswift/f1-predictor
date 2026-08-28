@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 
-{% block title %}{{ league['name'] }} - F1 Predictor{% endblock %}
+{% block title %}Join {{ league['name'] }} - F1 Predictor{% endblock %}
 
 {% block content %}
-<div class="card">
+<div class="card" style="text-align: center;">
     <h2>{{ league['emoji_or_color'] }} {{ league['name'] }}</h2>
     <p>
         {% if league['whole_season'] %}
@@ -12,10 +12,11 @@
         Scoring window: round {{ league['start_round'] }} forward
         {% endif %}
     </p>
+    <p style="opacity: 0.7;">You've been invited to join this league!</p>
 </div>
 
 <div class="card">
-    <h3>Members</h3>
+    <h3>Members ({{ members|length }})</h3>
     <div class="table-scroll">
     <table>
         <thead>
@@ -36,10 +37,13 @@
         </tbody>
     </table>
     </div>
-    {% if is_member %}
-    <div style="margin-top: 16px;">
-        <a href="{{ url_for('league_invite', league_id=league['id']) }}" class="btn">Invite someone</a>
+</div>
+
+<div class="card" style="text-align: center;">
+    <h3>Join this league</h3>
+    <p>Sign in or create an account to accept the invitation and start making predictions.</p>
+    <div style="margin: 20px 0;">
+        <a href="{{ url_for('login') }}" class="btn">Sign in / Register</a>
     </div>
-    {% endif %}
 </div>
 {% endblock %}

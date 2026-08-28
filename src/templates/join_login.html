@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block title %}Join League - F1 Predictor{% endblock %}
+
+{% block content %}
+<div class="card" style="text-align: center; margin-top: 50px;">
+    <h1 style="font-size: 48px; margin-bottom: 10px;">🏁</h1>
+    <h1>Join {{ league['emoji_or_color'] }} {{ league['name'] }}</h1>
+    <p style="font-size: 18px; margin: 30px 0;">
+        Sign in or pick a name to join this league.
+    </p>
+
+    <form method="POST" action="{{ url_for('set_username') }}" style="max-width: 400px; margin: 0 auto;">
+        <input type="hidden" name="redirect" value="{{ join_path }}">
+        <input type="text" name="username" placeholder="Enter your name" required autofocus>
+        <button type="submit" class="btn" style="width: 100%;">Join with name</button>
+    </form>
+
+    <p style="margin-top: 20px; opacity: 0.6; font-size: 14px;">
+        Want to keep your account across devices?
+        <a href="{{ url_for('login') }}" style="color: #fff; text-decoration: underline;">Log in with email</a>
+        or
+        <a href="{{ url_for('login_oauth_google') }}" style="color: #fff; text-decoration: underline;">Sign in with Google</a>
+    </p>
+</div>
+{% endblock %}

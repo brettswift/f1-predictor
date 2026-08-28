@@ -19,6 +19,7 @@ from urllib.parse import urlencode
 
 import click
 from flask import Flask, render_template, request, redirect, url_for, session, g, flash, jsonify
+from itsdangerous import URLSafeTimedSerializer
 
 import openf1
 import fetch_attempts
@@ -55,6 +56,11 @@ GOOGLE_USERINFO_ENDPOINT = 'https://openidconnect.googleapis.com/v1/userinfo'
 GOOGLE_OAUTH_SCOPE = 'openid email profile'
 
 app.config['GOOGLE_OAUTH_CLIENT_ID'] = os.environ.get('GOOGLE_OAUTH_CLIENT_ID', '')
+
+INVITE_SALT = 'invite-link'
+
+def _get_invite_serializer():
+    return URLSafeTimedSerializer(app.secret_key, salt=INVITE_SALT)
 app.config['GOOGLE_OAUTH_CLIENT_SECRET'] = os.environ.get('GOOGLE_OAUTH_CLIENT_SECRET', '')
 app.config['GOOGLE_OAUTH_REDIRECT_URI'] = os.environ.get(
     'GOOGLE_OAUTH_REDIRECT_URI',
@@ -1765,6 +1771,73 @@ def league_detail(league_id):
                           is_member=is_league_member(db, league_id, user['session_id']))
 
 
+@app.route('/leagues/<int:league_id>/invite')
+def league_invite(league_id):
+    """Generate an invite link for a league. Only current members can invite."""
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+
+    db = get_db()
+    league = db.execute('SELECT * FROM leagues WHERE id = ?', (league_id,)).fetchone()
+    if not league:
+        flash('League not found', 'error')
+        return redirect(url_for('leagues'))
+
+    if not is_league_member(db, league_id, user['session_id']):
+        flash('Only league members can generate invite links', 'error')
+        return redirect(url_for('league_detail', league_id=league_id))
+
+    serializer = _get_invite_serializer()
+    token = serializer.dumps(league_id)
+    invite_url = url_for('league_join', token=token, _external=True)
+    return render_template('league_invite.html',
+                           league=league,
+                           league_id=league_id,
+                           invite_url=invite_url,
+                           invite_max_age_days=7)
+
+
+@app.route('/leagues/join/<token>')
+def league_join(token):
+    """Join a league via invite token."""
+    serializer = _get_invite_serializer()
+    try:
+        league_id = serializer.loads(token, max_age=86400*7)
+    except Exception:
+        flash('Invalid or expired invite link', 'error')
+        return redirect(url_for('index'))
+
+    db = get_db()
+    league = db.execute('SELECT * FROM leagues WHERE id = ?', (league_id,)).fetchone()
+    if not league:
+        flash('League not found', 'error')
+        return redirect(url_for('index'))
+
+    user = get_current_user()
+    if not user:
+        # Cold user: show league info without a login wall (AC #2).
+        members = get_league_members(db, league_id)
+        session['join_league_token'] = token
+        return render_template('league_join_cold.html',
+                               league=league,
+                               members=members,
+                               token=token)
+
+    if is_league_member(db, league_id, user['session_id']):
+        flash('You are already a member of this league', 'info')
+        return redirect(url_for('league_detail', league_id=league_id))
+
+    current_round = _current_or_next_round(db)
+    db.execute(
+        'INSERT INTO league_members (league_id, user_id, joined_at_round) VALUES (?, ?, ?)',
+        (league_id, user['session_id'], current_round)
+    )
+    db.commit()
+    flash('You have joined the league!', 'success')
+    return redirect(url_for('league_detail', league_id=league_id))
+
+
 @app.route('/races')
 def races():
     """Show all races and their status."""
@@ -2080,6 +2153,9 @@ def login_verify(token):
 
     bind_email_to_session(email)
     flash('You are now logged in.', 'success')
+    pending_token = session.pop('join_league_token', None)
+    if pending_token:
+        return redirect(url_for('league_join', token=pending_token))
     return redirect(url_for('home'))
 
 
