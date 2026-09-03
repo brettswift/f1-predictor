@@ -57,6 +57,8 @@ COPY src/ ./src/
 COPY cron/ ./cron/
 COPY requirements.txt ./
 
+ARG APP_VERSION=unknown
+ENV APP_VERSION=${APP_VERSION}
 ENV PYTHONUNBUFFERED=1
 EXPOSE 5000
 
