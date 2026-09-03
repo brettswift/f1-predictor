@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+
+{% block title %}Sim Admin - F1 Predictor{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>🎮 Sim Admin Controls</h2>
+    <p style="opacity: 0.8;">
+        Unlisted sim control panel — no nav link, admin only.
+    </p>
+</div>
+
+<div class="card" id="sim-controls">
+    {% for control in controls %}
+    <div style="margin-bottom: 20px; padding: 20px; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px;">
+        <h3>{{ control['label'] }}</h3>
+        <button
+            class="btn"
+            data-sim-endpoint="{{ url_for(control['endpoint']) }}"
+            data-sim-method="{{ control['method'] }}"
+            data-sim-confirm="{{ 'true' if control['require_confirmation'] else 'false' }}"
+            data-sim-id="{{ control['id'] }}"
+            onclick="handleSimControl(this)"
+        >
+            {{ control['label'] }}
+        </button>
+    </div>
+    {% endfor %}
+</div>
+
+<!-- Toast container -->
+<div id="toast-container" style="position: fixed; top: 20px; right: 20px; z-index: 9999;"></div>
+
+<script>
+function showToast(message, type) {
+    type = type || 'success';
+    var container = document.getElementById('toast-container');
+    var toast = document.createElement('div');
+    toast.className = 'alert alert-' + type;
+    toast.textContent = message;
+    toast.style.marginBottom = '10px';
+    toast.style.minWidth = '200px';
+    toast.style.animation = 'slideIn 0.3s ease-out';
+    container.appendChild(toast);
+
+    // Add slide-in keyframes
+    if (!document.getElementById('toast-style')) {
+        var style = document.createElement('style');
+        style.id = 'toast-style';
+        style.textContent = '@keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }';
+        document.head.appendChild(style);
+    }
+
+    // Auto-remove after 5 seconds
+    setTimeout(function() {
+        toast.style.opacity = '0';
+        toast.style.transition = 'opacity 0.3s';
+        setTimeout(function() { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 300);
+    }, 5000);
+}
+
+function handleSimControl(button) {
+    var confirmRequired = button.getAttribute('data-sim-confirm') === 'true';
+    var method = button.getAttribute('data-sim-method');
+    var endpoint = button.getAttribute('data-sim-endpoint');
+
+    if (confirmRequired) {
+        if (!confirm('Are you sure you want to proceed with "' + button.textContent.trim() + '"?')) {
+            return;
+        }
+    }
+
+    // Disable button during request
+    button.disabled = true;
+    var originalText = button.textContent;
+    button.textContent = 'Loading...';
+
+    fetch(endpoint, {
+        method: method,
+        headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+        }
+    }).then(function(response) {
+        button.disabled = false;
+        button.textContent = originalText;
+
+        if (response.ok) {
+            showToast(button.textContent.trim() + ' completed successfully', 'success');
+        } else {
+            showToast(button.textContent.trim() + ' failed', 'error');
+        }
+    }).catch(function() {
+        button.disabled = false;
+        button.textContent = originalText;
+        showToast(button.textContent.trim() + ' failed — network error', 'error');
+    });
+}
+</script>
+{% endblock %}

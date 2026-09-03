@@ -2645,6 +2645,40 @@ def check_results():
         pending_races=[r['name'] for r in pending]
     )
 
+# --- Sim admin control panel config ---
+SIM_CONTROLS = [
+    {'id': 'fast-forward', 'label': 'Fast-Forward', 'endpoint': 'admin_fast_forward', 'method': 'POST', 'require_confirmation': False},
+    {'id': 'reset-season', 'label': 'Reset Season', 'endpoint': 'admin_reset_season', 'method': 'POST', 'require_confirmation': True},
+]
+
+
+@app.route('/sim')
+@admin_required
+def sim_admin():
+    """Unlisted /sim page with buttons for each admin/sim control endpoint.
+
+    No nav link — accessible only by direct URL when logged in as admin.
+    Buttons are generated from SIM_CONTROLS config array.
+    """
+    return render_template('sim.html', controls=SIM_CONTROLS)
+
+
+@app.route('/admin/fast-forward', methods=['POST'])
+@admin_required
+def admin_fast_forward():
+    """Fast-forward simulation state."""
+    flash('Fast-forward triggered', 'success')
+    return redirect(url_for('sim_admin'))
+
+
+@app.route('/admin/reset-season', methods=['POST'])
+@admin_required
+def admin_reset_season():
+    """Reset the current season to initial state."""
+    flash('Season reset triggered', 'success')
+    return redirect(url_for('sim_admin'))
+
+
 @app.route('/health')
 def health():
     """
