@@ -58,8 +58,10 @@ COPY cron/ ./cron/
 COPY requirements.txt ./
 
 ENV PYTHONUNBUFFERED=1
-EXPOSE 8000
+EXPOSE 5000
 
 # app.py (and its templates/ dir) live under src/ — chdir there so gunicorn's
 # module import and Flask's template lookup both resolve correctly.
-CMD ["gunicorn", "--chdir", "src", "--bind", "0.0.0.0:8000", "app:app"]
+# Port 5000 matches k8s_nas apps/f1-predictor/base/{service,deployment}.yaml
+# (targetPort / liveness / readiness probes) — do not change independently.
+CMD ["gunicorn", "--chdir", "src", "--bind", "0.0.0.0:5000", "app:app"]
