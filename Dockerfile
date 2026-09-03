@@ -35,7 +35,7 @@ COPY --from=builder /install /usr/local
 # Copy source and tests
 COPY src/ ./src/
 COPY tests/ ./tests/
-COPY conftest.py ./
+COPY pyproject.toml ./
 
 # Run tests and exit
 CMD ["pytest", "-v", "--tb=short"]
@@ -54,11 +54,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /install /usr/local/
 
 COPY src/ ./src/
-COPY templates/ ./templates/
 COPY cron/ ./cron/
 COPY requirements.txt ./
 
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]
+# app.py (and its templates/ dir) live under src/ — chdir there so gunicorn's
+# module import and Flask's template lookup both resolve correctly.
+CMD ["gunicorn", "--chdir", "src", "--bind", "0.0.0.0:8000", "app:app"]
