@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 
-{% block title %}{{ race_slug }} - F1 Predictor{% endblock %}
+{% block title %}{{ race['name'] }} - {{ race_slug }} - F1 Predictor{% endblock %}
+{% block meta_description %}{{ race['name'] }} — Round {{ race['round'] }} of the {{ f1_season }} F1 season. View predictions, podium results, and user scores.{% endblock %}
+{% block og_title %}{{ race['name'] }} - F1 Predictor{% endblock %}
+{% block og_description %}{{ race['name'] }} — Round {{ race['round'] }} of the {{ f1_season }} F1 season. View predictions, results, and scores.{% endblock %}
 
 {% block extra_css %}
 <style>
