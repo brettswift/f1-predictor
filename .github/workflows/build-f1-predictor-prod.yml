@@ -1,27 +1,39 @@
 name: Build f1-predictor prod image
 
+# Renamed in spirit only: this deploys to the "QA" environment at f1.brettswift.com
+# (still called "prod" in k8s_nas paths/tags for now — see docs/projects/BUD/workflow-improvement-plan.md).
 on:
   push:
-    branches: [live]
-    tags: [v*]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
+      contents: write
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Set version (tag or short SHA)
+      - name: Compute next semver tag
         id: version
         run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          git fetch --tags -q
+          LAST=$(git tag -l 'v*.*.*' | sort -V | tail -n1)
+          if [ -z "$LAST" ]; then
+            NEXT="v0.1.0"
           else
-            echo "version=$(git rev-parse --short ${{ github.sha }})" >> $GITHUB_OUTPUT
+            MAJOR=$(echo "$LAST" | sed -E 's/^v([0-9]+)\..*/\1/')
+            MINOR=$(echo "$LAST" | sed -E 's/^v[0-9]+\.([0-9]+)\..*/\1/')
+            PATCH=$(echo "$LAST" | sed -E 's/^v[0-9]+\.[0-9]+\.([0-9]+)$/\1/')
+            NEXT="v${MAJOR}.${MINOR}.$((PATCH + 1))"
           fi
+          SHORT_SHA=$(git rev-parse --short "${{ github.sha }}")
+          echo "semver=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -34,11 +46,52 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
           push: true
           build-args: |
-            APP_VERSION=${{ steps.version.outputs.version }}
-          tags: ghcr.io/${{ github.repository_owner }}/f1-predictor:live
+            APP_VERSION=${{ steps.version.outputs.semver }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/f1-predictor:live
+            ghcr.io/${{ github.repository_owner }}/f1-predictor:${{ steps.version.outputs.semver }}
+            ghcr.io/${{ github.repository_owner }}/f1-predictor:sha-${{ steps.version.outputs.sha }}
+
+      - name: Tag release in this repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.version.outputs.semver }}"
+          git push origin "${{ steps.version.outputs.semver }}"
+
+      - name: Write back digest to k8s_nas
+        env:
+          GH_TOKEN: ${{ secrets.K8S_NAS_PAT }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "K8S_NAS_PAT not set — skipping deploy write-back. Image was built and tagged: ${{ steps.version.outputs.semver }} (${{ steps.build.outputs.digest }})"
+            exit 0
+          fi
+          git clone --depth 1 --branch live "https://x-access-token:${GH_TOKEN}@github.com/brettswift/k8s_nas.git" /tmp/k8s_nas
+          cd /tmp/k8s_nas
+          FILE=apps/f1-predictor/overlays/prod/kustomization.yaml
+          python3 - "$FILE" "${{ steps.build.outputs.digest }}" "${{ steps.version.outputs.semver }}" <<'PYEOF'
+          import sys, re
+          path, digest, semver = sys.argv[1:4]
+          with open(path) as f:
+              text = f.read()
+          # Replace existing digest: or newTag: line under the images: block for f1-predictor
+          text = re.sub(r'(\n(?:  digest: sha256:[0-9a-f]+|  newTag: \S+))', f'\n  digest: {digest}', text, count=1)
+          if '  digest:' not in text and '  newTag:' not in text:
+              text = text.rstrip('\n') + f'\n  digest: {digest}\n'
+          with open(path, 'w') as f:
+              f.write(text)
+          print(f"Set {path} -> digest {digest} (image {semver})")
+          PYEOF
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$FILE"
+          git commit -m "f1-predictor: auto-deploy ${{ steps.version.outputs.semver }} (${{ steps.build.outputs.digest }})" || { echo "No changes to commit"; exit 0; }
+          git push origin live
