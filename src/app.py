@@ -2692,6 +2692,7 @@ def health():
     last_ok = fetch_attempts.last_successful_fetch_at(db)
     payload = {
         'status': 'healthy',
+        'version': os.environ.get('APP_VERSION', 'unknown'),
         'last_successful_fetch_at': last_ok.isoformat() if last_ok else None,
         'last_successful_fetch_age_seconds': (
             round((datetime.now(timezone.utc) - last_ok).total_seconds()) if last_ok else None
