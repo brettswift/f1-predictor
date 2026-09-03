@@ -32,6 +32,7 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 # Environment configuration
 app.config['ENVIRONMENT'] = os.environ.get('ENVIRONMENT', 'dev')
 app.config['API_BASE_URL'] = os.environ.get('API_BASE_URL', '')
+app.config['SITE_URL'] = os.environ.get('SITE_URL', 'https://f1.brettswift.com')
 app.config['USE_STUB_API'] = os.environ.get('USE_STUB_API', 'false').lower() == 'true'
 app.config['OPENF1_API_URL'] = openf1.OPENF1_BASE_URL
 app.config['F1_SEASON'] = int(os.environ.get('F1_SEASON', '2026'))
@@ -92,7 +93,9 @@ def inject_environment():
         api_base_url=app.config['API_BASE_URL'],
         use_stub_api=app.config['USE_STUB_API'],
         app_version=os.environ.get('APP_VERSION', ''),
-        f1_season=app.config['F1_SEASON']
+        f1_season=app.config['F1_SEASON'],
+        site_url=app.config['SITE_URL'],
+        google_site_verification=os.environ.get('GOOGLE_SITE_VERIFICATION', '')
     )
 
 
@@ -1922,28 +1925,23 @@ def _race_detail_impl(race_id, db, user):
 
 @app.route('/race/<int:race_id>')
 def race_detail_by_id(race_id):
-    """Redirect to slug URL for clean address bar."""
-    user = get_current_user()
-    if not user:
-        return redirect(url_for('index'))
+    """Redirect to slug URL for clean address bar. Public: no auth required."""
     db = get_db()
     race_row = db.execute('SELECT * FROM races WHERE id = ?', (race_id,)).fetchone()
     if not race_row:
-        flash('Race not found', 'error')
-        return redirect(url_for('races'))
+        return redirect(url_for('index'), code=302)
     race = enrich_race_with_status(dict(race_row), db.execute('SELECT 1 FROM results WHERE race_id = ?', (race_id,)).fetchone() is not None)
     if race['status'] not in ('locked', 'completed'):
-        flash('Picks are visible after the race is locked', 'error')
-        return redirect(url_for('races'))
+        return redirect(url_for('index'), code=302)
     return redirect(url_for('race_detail', slug=race_slug(race)), code=301)
 
 
 @app.route('/race/<slug>')
 def race_detail(slug):
-    """Show individual race with all voters' picks. URL uses slug e.g. 2026_chinese."""
+    """Show individual race with all voters' picks. URL uses slug e.g. 2026_chinese.
+    Anonymous users can view locked/completed races (SEO requirement).
+    """
     user = get_current_user()
-    if not user:
-        return redirect(url_for('index'))
 
     db = get_db()
     all_races = get_races_with_computed_status(db)
@@ -1953,13 +1951,11 @@ def race_detail(slug):
             race = r
             break
     if not race:
-        flash('Race not found', 'error')
-        return redirect(url_for('races'))
+        return redirect(url_for('index'), code=302)
 
     data = _race_detail_impl(race['id'], db, user)
     if not data:
-        flash('Picks are visible after the race is locked', 'error')
-        return redirect(url_for('races'))
+        return redirect(url_for('index'), code=302)
 
     race, has_results, result_names, result_ids, predictions, scores_by_user = data
 
@@ -1971,6 +1967,82 @@ def race_detail(slug):
                           result_ids=result_ids or {},
                           scores_by_user=scores_by_user)
 
+
+def _build_sitemap():
+    """Build sitemap XML listing all indexable pages."""
+    from xml.etree import ElementTree as ET
+    import io
+
+    base_url = app.config['SITE_URL']
+
+    root = ET.Element('urlset')
+    root.set('xmlns', 'http://www.sitemaps.org/schemas/sitemap/0.9')
+
+    # Landing page
+    url = ET.SubElement(root, 'url')
+    loc = ET.SubElement(url, 'loc')
+    loc.text = f'{base_url}/'
+    changefreq = ET.SubElement(url, 'changefreq')
+    changefreq.text = 'weekly'
+
+    # Home page (requires auth, but still list it)
+    url = ET.SubElement(root, 'url')
+    loc = ET.SubElement(url, 'loc')
+    loc.text = f'{base_url}/home'
+    changefreq = ET.SubElement(url, 'changefreq')
+    changefreq.text = 'daily'
+
+    # Race pages
+    db = get_db()
+    all_races = get_races_with_computed_status(db)
+    for race in all_races:
+        if race['status'] in ('locked', 'completed'):
+            url = ET.SubElement(root, 'url')
+            loc = ET.SubElement(url, 'loc')
+            slug = race_slug(race)
+            loc.text = f'{base_url}/race/{slug}'
+            changefreq = ET.SubElement(url, 'changefreq')
+            changefreq.text = 'daily'
+
+    tree = ET.ElementTree(root)
+    buf = io.BytesIO()
+    tree.write(buf, encoding='utf-8', xml_declaration=True)
+    return buf.getvalue()
+
+
+@app.route('/sitemap.xml')
+def sitemap_xml():
+    """Serve sitemap.xml for search engines."""
+    xml_content = _build_sitemap()
+    return app.response_class(
+        response=xml_content,
+        mimetype='application/xml',
+        status=200
+    )
+
+
+@app.route('/robots.txt')
+def robots_txt():
+    """Serve robots.txt allowing public pages, disallowing session-gated paths."""
+    robots_content = (
+        'User-agent: *\n'
+        'Allow: /$\n'
+        'Allow: /race/\n'
+        'Disallow: /admin/\n'
+        'Disallow: /races\n'
+        'Disallow: /login\n'
+        'Disallow: /login/\n'
+        'Disallow: /migrate\n'
+        'Disallow: /profile\n'
+        'Disallow: /leagues\n'
+        'Disallow: /live/\n'
+        'Sitemap: https://f1.brettswift.com/sitemap.xml\n'
+    )
+    return app.response_class(
+        response=robots_content,
+        mimetype='text/plain',
+        status=200
+    )
 
 @app.route('/race/<int:race_id>/live')
 def live_leaderboard(race_id):

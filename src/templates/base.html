@@ -3,6 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="{% block meta_description %}Predict the F1 podium for each race. No signup required — just enter your name and compete!{% endblock %}">
+    <meta property="og:title" content="{% block og_title %}F1 Predictor{% endblock %}">
+    <meta property="og:description" content="{% block og_description %}Predict the F1 podium for each race. Compete with friends on the leaderboard!{% endblock %}">
+    <meta property="og:url" content="{{ request.url }}">
+    <meta property="og:image" content="{% block og_image %}{{ url_for('static', filename='og-fallback.png', _external=True) }}{% endblock %}">
+    <meta property="og:type" content="website">
+    <meta name="google-site-verification" content="{{ google_site_verification or 'GSC_VERIFICATION_CODE' }}" />
     <title>{% block title %}F1 Predictor{% endblock %}</title>
     <style>
         * {
