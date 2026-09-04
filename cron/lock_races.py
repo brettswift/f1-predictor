@@ -16,8 +16,7 @@ import os
 import sys
 import sqlite3
 import logging
-# datetime/timezone are available if needed by future callers; lock_races() uses
-# sqlite's datetime('now') so it stays correct regardless of host TZ.
+# datetime/timezone are available if needed by future callers.
 from datetime import datetime, timezone
 
 logging.basicConfig(
@@ -41,14 +40,14 @@ def lock_races(db):
 
     Returns the number of races locked.
     """
-    # Use sqlite's built-in datetime('now') as the authoritative wall clock.
-    # This matches the web app's auto_lock_races() query and avoids drift
-    # between the SELECT and UPDATE predicates.
+    # Use sqlite's datetime('now', 'utc') so the comparison is always UTC,
+    # matching how dates are stored (UTC).  The 'utc' modifier ensures this
+    # works even if the container's system timezone is not UTC.
     rows = db.execute('''
         SELECT id, name, date
         FROM races
         WHERE status = 'open'
-          AND datetime(date) < datetime('now')
+          AND datetime(date) < datetime('now', 'utc')
     ''').fetchall()
 
     if not rows:

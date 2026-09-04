@@ -183,8 +183,6 @@ class TestLockRacesLogic:
             lr.lock_races(db_connection)
 
         assert any('No races to lock' in record.message for record in caplog.records)
-<<<<<<< HEAD
-=======
 
 
 class TestLockRacesCronJobManifest:
