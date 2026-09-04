@@ -14,6 +14,7 @@ import sqlite3
 import requests
 from datetime import datetime, timezone, timedelta
 
+from collections import defaultdict
 from functools import wraps
 from urllib.parse import urlencode
 
@@ -2422,6 +2423,128 @@ def profile():
         drivers=drivers,
         avatar_choices=DEFAULT_AVATAR_EMOJIS,
     )
+
+
+# F1-41 / BUD-141: permanent season-stats profile page.
+MAX_POINTS_PER_RACE = 20  # exact P1/P2/P3 (10+6+4) + 0 driver-matches.
+
+
+def _get_season_stats(db, user_session_id, season):
+    """Compute season stats keyed on the existing scores table.
+
+    Reuses the global leaderboard's scoring source: points come only from
+    the scores table, and rank history is derived from cumulative point
+    totals across completed races in the season.
+    """
+    # Completed races in chronological order for the selected season.
+    races = db.execute('''
+        SELECT id, name, round, date
+        FROM races
+        WHERE status = 'completed'
+          AND strftime('%Y', date) = ?
+        ORDER BY round ASC
+    ''', (str(season),)).fetchall()
+
+    if not races:
+        return {
+            'season': season,
+            'total_score': 0,
+            'races_scored': 0,
+            'overall_accuracy_pct': 0.0,
+            'best_race': None,
+            'rank_history': [],
+        }
+
+    # All non-synthetic users, mirroring the global leaderboard population.
+    user_rows = db.execute('''
+        SELECT session_id FROM users WHERE is_synthetic = 0
+    ''').fetchall()
+    all_user_ids = {row['session_id'] for row in user_rows}
+
+    race_ids = [r['id'] for r in races]
+    placeholders = ','.join('?' * len(race_ids))
+
+    # Index scores by (user_id, race_id) for fast cumulative building.
+    score_rows = db.execute(f'''
+        SELECT user_id, race_id, points
+        FROM scores
+        WHERE race_id IN ({placeholders})
+    ''', race_ids).fetchall()
+    scores_by_user_race = {
+        (row['user_id'], row['race_id']): row['points'] for row in score_rows
+    }
+
+    user_totals = defaultdict(int)
+    rank_history = []
+    user_race_points = []  # for best-race calculation
+
+    for race in races:
+        race_id = race['id']
+        for user_id in all_user_ids:
+            user_totals[user_id] += scores_by_user_race.get((user_id, race_id), 0)
+
+        sorted_totals = sorted(user_totals.items(), key=lambda x: x[1], reverse=True)
+        current_total = user_totals.get(user_session_id, 0)
+        # 1 + number of players with strictly more points (ties share rank).
+        rank = 1 + sum(1 for _, total in sorted_totals if total > current_total)
+        total_users = len(sorted_totals)
+
+        race_points = scores_by_user_race.get((user_session_id, race_id), 0)
+        user_race_points.append((race_points, race))
+
+        rank_history.append({
+            'race_id': race_id,
+            'name': race['name'],
+            'round': race['round'],
+            'date': race['date'],
+            'points': race_points,
+            'cumulative_points': current_total,
+            'rank': rank,
+            'total_users': total_users,
+        })
+
+    total_score = user_totals.get(user_session_id, 0)
+    races_scored = sum(1 for pts, _ in user_race_points if pts > 0)
+
+    if user_race_points:
+        best_points, best_race_row = max(user_race_points, key=lambda x: x[0])
+        best_race = {
+            'race_id': best_race_row['id'],
+            'name': best_race_row['name'],
+            'round': best_race_row['round'],
+            'date': best_race_row['date'],
+            'points': best_points,
+        }
+    else:
+        best_race = None
+
+    possible_points = len(races) * MAX_POINTS_PER_RACE
+    accuracy = (
+        round((total_score / possible_points) * 100, 1)
+        if possible_points else 0.0
+    )
+
+    return {
+        'season': season,
+        'total_score': total_score,
+        'races_scored': races_scored,
+        'overall_accuracy_pct': accuracy,
+        'best_race': best_race,
+        'rank_history': rank_history,
+    }
+
+
+@app.route('/stats')
+def season_stats():
+    """Permanent season-stats page for the logged-in user."""
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+
+    db = get_db()
+    season = app.config['F1_SEASON']
+    stats = _get_season_stats(db, user['session_id'], season)
+    return render_template('season_stats.html', user=user, stats=stats)
 
 
 @app.route('/admin/legacy-users', methods=['GET', 'POST'])
