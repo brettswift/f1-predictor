@@ -16,6 +16,7 @@ import os
 import sys
 import sqlite3
 import logging
+# datetime/timezone are available if needed by future callers.
 from datetime import datetime, timezone
 
 logging.basicConfig(
@@ -39,12 +40,14 @@ def lock_races(db):
 
     Returns the number of races locked.
     """
-    # Find races that should be locked
+    # Use sqlite's datetime('now', 'utc') so the comparison is always UTC,
+    # matching how dates are stored (UTC).  The 'utc' modifier ensures this
+    # works even if the container's system timezone is not UTC.
     rows = db.execute('''
         SELECT id, name, date
         FROM races
         WHERE status = 'open'
-        AND datetime(date) < datetime('now', 'utc')
+          AND datetime(date) < datetime('now', 'utc')
     ''').fetchall()
 
     if not rows:

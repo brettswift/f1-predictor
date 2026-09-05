@@ -183,3 +183,14 @@ class TestLockRacesLogic:
             lr.lock_races(db_connection)
 
         assert any('No races to lock' in record.message for record in caplog.records)
+
+# Note: there is deliberately no standalone lock-races CronJob manifest.
+# Locking is covered by two live paths - cron/race_manager.py's
+# promote_to_locked() (base/race-manager-cronjob.yaml, every 5 min on race
+# weekend days) and app.py's auto_lock_races() in-process fallback. A
+# standalone f1-lock-races CronJob running this script was added once
+# (2026-08-27) and removed the same day in BUD-127 as dead/unwired config;
+# test_cronjob_deployment.py::test_orphaned_cronjob_manifests_removed
+# guards against it coming back. This file's lock_races() stays covered by
+# the tests above as a tested pure function, not because anything deploys it.
+
