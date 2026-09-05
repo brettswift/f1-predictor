@@ -1,26 +1,29 @@
 {% extends "base.html" %}
-
 {% block title %}Invite - {{ league['name'] }} - F1 Predictor{% endblock %}
-
 {% block content %}
-<div class="card" style="text-align: center;">
-    <h2>🔗 Invite to {{ league['emoji_or_color'] }} {{ league['name'] }}</h2>
-    <p>Share this link with anyone you want to join your league.</p>
-    <input type="text" id="invite-url" value="{{ invite_url }}" readonly style="width: 100%; margin: 20px 0;" onclick="this.select();">
-    <p>
-        <button class="btn" onclick="copyInvite()">Copy link</button>
-        <a href="{{ url_for('league_detail', league_id=league_id) }}" class="btn btn-secondary">Back to league</a>
-    </p>
-    <p style="opacity: 0.6; font-size: 14px;">This link is valid for {{ invite_max_age_days }} days and can be used by one person.</p>
-</div>
-
+<section class="panel centered">
+  <div class="phead"><h2>Invite</h2><div class="rule"></div><span class="lbl">{{ league['emoji_or_color'] }} {{ league['name'] }}</span></div>
+  <div class="pbody">
+    <p>One link, one person. Send it to whoever you want on the board.</p>
+    <div class="field" style="margin-top:16px">
+      <label for="invite-url">Invite link</label>
+      <input type="text" id="invite-url" value="{{ invite_url }}" readonly onclick="this.select();" style="font-family:var(--mono);font-size:12px">
+    </div>
+    <div class="btnrow">
+      <button type="button" class="btn" onclick="copyInvite()"><span id="copylabel">Copy link</span></button>
+      <a href="{{ url_for('league_detail', league_id=league_id) }}" class="btn btn-secondary"><span>Back to league</span></a>
+    </div>
+    <p class="lbl" style="margin-top:16px">Valid {{ invite_max_age_days }} days · single use</p>
+  </div>
+</section>
+{% endblock %}
+{% block extra_js %}
 <script>
-function copyInvite() {
-    var el = document.getElementById('invite-url');
-    el.select();
-    document.execCommand('copy');
-    el.setSelectionRange(0, 0);
-    alert('Invite link copied!');
+function copyInvite(){
+  var el = document.getElementById('invite-url');
+  el.select(); el.setSelectionRange(0, 99999);
+  var done = function(){ var l = document.getElementById('copylabel'); l.textContent = 'Copied'; setTimeout(function(){ l.textContent = 'Copy link'; }, 1800); };
+  if(navigator.clipboard){ navigator.clipboard.writeText(el.value).then(done, done); } else { document.execCommand('copy'); done(); }
 }
 </script>
 {% endblock %}

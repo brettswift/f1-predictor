@@ -1,26 +1,20 @@
 {% extends "base.html" %}
-
-{% block title %}Join League - F1 Predictor{% endblock %}
-
+{% block title %}Join {{ league['name'] }} - F1 Predictor{% endblock %}
 {% block content %}
-<div class="card" style="text-align: center; margin-top: 50px;">
-    <h1 style="font-size: 48px; margin-bottom: 10px;">🏁</h1>
-    <h1>Join {{ league['emoji_or_color'] }} {{ league['name'] }}</h1>
-    <p style="font-size: 18px; margin: 30px 0;">
-        Sign in or pick a name to join this league.
-    </p>
-
-    <form method="POST" action="{{ url_for('set_username') }}" style="max-width: 400px; margin: 0 auto;">
-        <input type="hidden" name="redirect" value="{{ join_path }}">
-        <input type="text" name="username" placeholder="Enter your name" required autofocus>
-        <button type="submit" class="btn" style="width: 100%;">Join with name</button>
+<section class="panel centered">
+  <div class="phead"><h2>Join League</h2><div class="rule"></div><span class="lbl">Invitation</span></div>
+  <div class="pbody">
+    <h1 style="font-size:30px">{{ league['emoji_or_color'] }} {{ league['name'] }}</h1>
+    <p style="margin-top:10px">Pick a name and you're racing. You can attach an email later without losing anything.</p>
+    <form method="POST" action="{{ url_for('set_username') }}" style="margin-top:18px">
+      <input type="hidden" name="redirect" value="{{ join_path }}">
+      <div class="field">
+        <label for="username">Your name</label>
+        <input type="text" id="username" name="username" placeholder="Pick a name" required autofocus>
+      </div>
+      <button type="submit" class="btn" style="width:100%"><span>Join with name</span></button>
     </form>
-
-    <p style="margin-top: 20px; opacity: 0.6; font-size: 14px;">
-        Want to keep your account across devices?
-        <a href="{{ url_for('login') }}" style="color: #fff; text-decoration: underline;">Log in with email</a>
-        or
-        <a href="{{ url_for('login_oauth_google') }}" style="color: #fff; text-decoration: underline;">Sign in with Google</a>
-    </p>
-</div>
+    <p style="margin-top:18px;font-size:12px">Want it to stick across devices? <a href="{{ url_for('login') }}">Use email</a> or <a href="{{ url_for('login_oauth_google') }}">continue with Google</a>.</p>
+  </div>
+</section>
 {% endblock %}

@@ -1,74 +1,566 @@
 {% extends "base.html" %}
 
-{% block title %}Home - F1 Predictor{% endblock %}
+{% block title %}Race Desk - F1 Predictor{% endblock %}
+{% block meta_description %}Where the field is leaning for the next Formula 1 race — crowd mood, safety-car odds, live standings, and your podium call.{% endblock %}
+
+{% block extra_css %}
+<style>
+.strip{padding:18px 18px 16px;background:linear-gradient(180deg,rgba(176,140,255,.05),transparent 70%)}
+.striptop{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.rn{font-family:var(--mono);font-size:10px;letter-spacing:.14em;color:var(--acc);
+  border:1px solid rgba(176,140,255,.32);padding:3px 7px;border-radius:3px}
+.stripgrid{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;flex-wrap:wrap;margin-top:14px}
+.cdrow{display:flex;gap:9px;align-items:flex-end;margin-top:3px}
+.cdu{text-align:center}
+.cdu .n{font-family:var(--cond);font-weight:700;font-size:34px;line-height:.9;font-variant-numeric:tabular-nums}
+.cdu .u{font-family:var(--mono);font-size:8.5px;letter-spacing:.14em;color:var(--dimmer);margin-top:3px}
+.cdsep{font-family:var(--cond);font-size:26px;color:#2C3140;line-height:1;padding-bottom:11px}
+.lockbar{display:flex;gap:2px;height:12px;align-items:flex-end;margin-top:14px}
+.lockbar i{flex:1;background:#20242F;border-radius:1px;height:5px;display:block}
+.lockbar i.f{background:var(--acc);height:10px;box-shadow:0 0 7px rgba(176,140,255,.45)}
+.snap{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border-top:1px solid var(--line)}
+.snap>div{background:var(--panel);padding:12px 16px}
+.snap .v{font-family:var(--cond);font-weight:700;font-size:24px;line-height:1.05;margin-top:2px}
+
+/* ── voting ── */
+.vote{padding:20px 16px 0;position:relative}
+.slots{display:grid;grid-template-columns:1fr 1.16fr 1fr;gap:12px;align-items:end}
+.slot{position:relative;transform:skewX(-7deg);border:1px solid var(--line2);border-radius:2px;width:100%;
+  background:linear-gradient(180deg,var(--panel2),#0D1017);height:150px;transition:.18s;cursor:pointer;
+  display:block;padding:0;text-align:left;font:inherit;color:inherit}
+.slot .in{transform:skewX(7deg);height:100%;padding:12px 14px;display:flex;flex-direction:column;justify-content:space-between}
+.slot[data-pos="1"]{height:184px}
+.slot[data-pos="3"]{height:134px}
+.slot.empty{border-style:dashed;border-color:rgba(255,255,255,.11);background:rgba(255,255,255,.012)}
+.slot.empty:hover{border-color:var(--acc);background:rgba(176,140,255,.06)}
+.slot.locked{cursor:default}
+.slot .posn{position:absolute;right:8px;bottom:2px;transform:skewX(7deg);font-family:var(--cond);font-weight:700;
+  font-size:74px;line-height:.8;color:transparent;-webkit-text-stroke:1px rgba(255,255,255,.075);pointer-events:none}
+.slot.filled .posn{-webkit-text-stroke:1px rgba(255,255,255,.13)}
+.slot .team{position:absolute;left:-1px;top:-1px;bottom:-1px;width:3px;border-radius:2px 0 0 2px}
+.slot .code{font-family:var(--cond);font-weight:700;font-size:32px;line-height:1;letter-spacing:.03em}
+.slot .nm{font-size:11px;color:var(--dim);margin-top:1px}
+.slot .ghost{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;color:var(--dimmer)}
+
+/* ── safety car ── */
+.scblock{display:grid;grid-template-columns:.85fr 1.15fr;gap:26px;align-items:start;
+  border-top:1px solid var(--line);margin:22px -16px 0;padding:20px 16px 6px}
+.scq h3{font-family:var(--cond);font-weight:500;font-size:21px;line-height:1.15;letter-spacing:.005em;
+  text-transform:none;margin:6px 0 6px;color:var(--tx)}
+.scq p{margin:0;font-size:11.5px;line-height:1.6}
+.scq p b{color:var(--warn);font-weight:500}
+.track{position:relative;height:52px;margin:6px 4px 0}
+.track .rail2{position:absolute;left:0;right:0;top:22px;height:8px;border-radius:6px;overflow:hidden;
+  background:linear-gradient(90deg,rgba(255,59,92,.22),rgba(255,255,255,.05) 50%,rgba(255,180,61,.26))}
+.track .fill{position:absolute;top:22px;height:8px;background:var(--warn);border-radius:6px;box-shadow:0 0 14px rgba(255,180,61,.55)}
+.track .fill.no{background:var(--neg);box-shadow:0 0 14px rgba(255,59,92,.5)}
+.track .mid{position:absolute;left:50%;top:14px;width:1px;height:24px;background:var(--line2)}
+.crowd{position:absolute;top:8px;transform:translateX(-50%);text-align:center;pointer-events:none}
+.crowd .pin{width:1px;height:36px;background:repeating-linear-gradient(180deg,#7C859E 0 3px,transparent 3px 6px);margin:0 auto}
+.crowd .t{font-family:var(--mono);font-size:8.5px;letter-spacing:.1em;color:#7C859E;white-space:nowrap;margin-top:2px}
+.knob{position:absolute;top:14px;transform:translateX(-50%);width:16px;height:24px;border-radius:3px;
+  background:linear-gradient(180deg,#fff,#C9CEDD);box-shadow:0 3px 12px rgba(0,0,0,.6)}
+.knob::after{content:'';position:absolute;left:50%;top:6px;transform:translateX(-50%);width:1px;height:12px;background:#5A6072}
+input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height:24px;opacity:0;margin:0;cursor:grab}
+.scends{display:flex;justify-content:space-between;margin-top:2px}
+.scout{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);border:1px solid var(--line);margin-top:16px}
+.scout div{background:var(--panel);padding:10px 12px}
+.scout .v{font-family:var(--cond);font-weight:700;font-size:22px;line-height:1.05;margin-top:2px}
+.scnote{margin-top:12px;font-size:11px;line-height:1.55;border-left:2px solid rgba(176,140,255,.4);padding-left:10px}
+.votefoot{display:flex;align-items:center;gap:18px;flex-wrap:wrap;border-top:1px solid var(--line);
+  margin:20px -16px 0;padding:14px 16px;background:rgba(255,255,255,.012)}
+
+/* ── picker ── */
+.scrim{position:fixed;inset:0;background:rgba(4,5,8,.72);backdrop-filter:blur(3px);z-index:500;
+  display:none;align-items:center;justify-content:center;padding:20px}
+.scrim.on{display:flex}
+.picker{width:100%;max-width:600px;max-height:82vh;overflow:auto;background:linear-gradient(180deg,var(--panel),#0C0F15);
+  border:1px solid var(--line2);border-radius:2px}
+.pickgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:7px;padding:16px}
+.dchip{display:flex;align-items:center;gap:9px;padding:9px 11px;border:1px solid var(--line);border-radius:2px;
+  background:var(--panel2);cursor:pointer;transition:.14s;text-align:left;font:inherit;color:inherit;width:100%}
+.dchip:hover{border-color:var(--acc);background:var(--raise)}
+.dchip:disabled{opacity:.2;cursor:not-allowed}
+.dchip i{width:2px;height:24px;border-radius:2px;display:block;flex:0 0 auto}
+.dchip .c{font-family:var(--cond);font-weight:600;font-size:17px;letter-spacing:.04em}
+.dchip .n{font-size:11px;color:var(--dim);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dchip .no{font-family:var(--mono);font-size:9.5px;color:var(--dimmer)}
+
+/* ── wire ── */
+.legend{display:flex;gap:14px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.legend span{display:flex;align-items:center;gap:5px}
+.legend i{width:8px;height:8px;border-radius:2px;display:block}
+.dv{display:grid;grid-template-columns:40px 1fr 42px;align-items:center;gap:10px;padding:5px 0}
+.dv .c{font-family:var(--cond);font-weight:600;font-size:15px;letter-spacing:.04em}
+.dv .g{position:relative;height:12px;background:#151925;border-radius:2px;overflow:hidden}
+.dv .g b{position:absolute;left:0;top:0;bottom:0;display:block;border-radius:2px}
+.dv .g b.pod{background:linear-gradient(90deg,rgba(38,224,138,.30),rgba(38,224,138,.55))}
+.dv .g b.win{background:var(--acc);height:6px;top:3px}
+.dv .v{font-family:var(--mono);font-size:9.5px;color:var(--dim);text-align:right}
+.wiregrid{display:grid;grid-template-columns:1.35fr 1fr;gap:0}
+.wiregrid>div{padding:16px}
+.wiregrid>div+div{border-left:1px solid var(--line)}
+.scbar{height:6px;border-radius:4px;background:#1C2130;overflow:hidden;margin:10px 0 8px}
+.scbar i{display:block;height:100%;background:linear-gradient(90deg,rgba(255,180,61,.45),var(--warn));border-radius:4px}
+.note{font-size:11.5px;line-height:1.6;margin-top:12px;padding:10px 12px;border:1px solid rgba(176,140,255,.24);
+  border-radius:2px;background:rgba(176,140,255,.055);color:#C7CBDA}
+.note b{color:var(--acc);font-weight:600}
+
+/* ── standings ── */
+.who{display:flex;align-items:center;gap:9px}
+.pfp{width:22px;height:22px;border-radius:50%;flex:0 0 auto;display:grid;place-items:center;font-size:12px;
+  background:rgba(255,255,255,.06);border:1px solid var(--line)}
+.scmeter{display:flex;align-items:center;gap:8px}
+.scmeter .m{height:4px;background:#1C2130;border-radius:3px;flex:1;min-width:40px;overflow:hidden}
+.scmeter .m i{display:block;height:100%;border-radius:3px;background:linear-gradient(90deg,rgba(255,180,61,.4),var(--warn))}
+.lsel{margin-left:auto;display:flex;align-items:center;gap:8px}
+.lsel select{width:auto;padding:6px 30px 6px 10px;font-size:11px}
+@media (max-width:860px){
+  .scblock{grid-template-columns:1fr;gap:14px}
+  .wiregrid{grid-template-columns:1fr}
+  .wiregrid>div+div{border-left:0;border-top:1px solid var(--line)}
+  .snap{grid-template-columns:1fr 1fr}
+  .slots{gap:7px}.slot .code{font-size:22px}.slot .nm{display:none}
+}
+</style>
+{% endblock %}
 
 {% block content %}
-<div class="card">
-    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px;">
-        <div>
-            <p style="opacity: 0.7; margin-bottom: 5px;">Welcome back,</p>
-            <h1 style="margin-bottom: 0;">{{ avatar_for(user) }} {{ display_name_for(user) }}</h1>
-        </div>
-        <div style="text-align: right;">
-            <p style="opacity: 0.7; margin-bottom: 5px;">Total Score</p>
-            <div class="score-badge" style="font-size: 24px;">{{ total_score }}</div>
-        </div>
-    </div>
-</div>
 
 {% if next_race %}
-<div class="card">
-    <h2>Next Race: {{ next_race['name'] }}</h2>
-    <p><strong>Round {{ next_race['round'] }}</strong> — {{ next_race['date'] }}</p>
-    
-    <div style="margin: 20px 0;">
-        <span class="status status-{{ next_race['status'] }}">{{ next_race['status']|upper }}</span>
+{% set votable = next_race['status'] == 'open' and not user_prediction %}
+<section class="panel strip">
+  <div class="striptop">
+    <span class="rn num">R{{ next_race['round'] }}</span>
+    <h1>{{ next_race['name'] }}</h1>
+    <span class="status status-{{ next_race['status'] }}">{{ next_race['status'] }}</span>
+  </div>
+  <div class="stripgrid">
+    <div>
+      <div class="lbl">Lights out</div>
+      <div class="num" style="font-size:13px;color:var(--dim);margin-top:4px">{{ next_race['date'] }}</div>
     </div>
-    
-    {% if user_prediction %}
-        <h3>Your Prediction</h3>
-        <div class="podium">
-            <div class="podium-position podium-p1">
-                <div style="font-size: 24px; font-weight: bold;">P1</div>
-                <div style="font-size: 14px; margin-top: 5px;">{{ user_prediction['p1_name'] }}</div>
-            </div>
-            <div class="podium-position podium-p2">
-                <div style="font-size: 24px; font-weight: bold;">P2</div>
-                <div style="font-size: 14px; margin-top: 5px;">{{ user_prediction['p2_name'] }}</div>
-            </div>
-            <div class="podium-position podium-p3">
-                <div style="font-size: 24px; font-weight: bold;">P3</div>
-                <div style="font-size: 14px; margin-top: 5px;">{{ user_prediction['p3_name'] }}</div>
-            </div>
-        </div>
-        
-        {% if next_race['status'] == 'open' %}
-            <a href="{{ url_for('predict', race_id=next_race['id']) }}" class="btn">Change Prediction</a>
-        {% endif %}
-    {% else %}
-        {% if next_race['status'] == 'open' %}
-            <p>You haven't made a prediction yet!</p>
-            <a href="{{ url_for('predict', race_id=next_race['id']) }}" class="btn">Make Prediction</a>
-        {% elif next_race['status'] == 'locked' %}
-            <p>Predictions are locked for this race.</p>
-        {% endif %}
-    {% endif %}
-</div>
-{% else %}
-<div class="card">
-    <h2>No Upcoming Races</h2>
-    <p>The F1 season hasn't started yet or all races have been completed.</p>
-</div>
+    <div id="cd" data-start="{{ next_race['date'] }}" style="text-align:right">
+      <div class="lbl">{% if next_race['status'] == 'open' %}Cards lock in{% else %}Race under way{% endif %}</div>
+      <div class="cdrow" style="justify-content:flex-end">
+        <div class="cdu"><div class="n" id="cdd">--</div><div class="u">Days</div></div>
+        <div class="cdsep">:</div>
+        <div class="cdu"><div class="n" id="cdh">--</div><div class="u">Hrs</div></div>
+        <div class="cdsep">:</div>
+        <div class="cdu"><div class="n" id="cdm">--</div><div class="u">Min</div></div>
+        <div class="cdsep">:</div>
+        <div class="cdu"><div class="n" id="cds">--</div><div class="u">Sec</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="lockbar" id="lockbar"></div>
+</section>
 {% endif %}
 
-<div class="card">
-    <h2>Quick Links</h2>
-    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-        {% if has_pending_results %}
-        <a href="{{ url_for('check_results') }}" class="btn">Check for Race Results</a>
+<!-- ══ 1. VOTING ══ -->
+<section class="panel">
+  <div class="phead">
+    <h2>Your Race Card</h2>
+    {% if anonymous %}<span class="tag">Visitor</span>
+    {% elif user_prediction %}<span class="tag pos">Locked in</span>
+    {% elif next_race and next_race['status'] == 'open' %}<span class="tag warn">Not voted</span>{% endif %}
+    <div class="rule"></div>
+    <span class="lbl">Podium 20 pts &middot; safety car pays from its own pool</span>
+  </div>
+
+  {% if not next_race %}
+  <div class="pbody"><p style="margin:0">No race on the board. The season either hasn't opened or every round is done.</p></div>
+  {% else %}
+  <form method="POST" action="{{ url_for('predict', race_id=next_race['id']) }}" id="cardform">
+    <input type="hidden" name="p1" id="f_p1" value="{{ user_prediction['p1_driver_id'] if user_prediction else '' }}">
+    <input type="hidden" name="p2" id="f_p2" value="{{ user_prediction['p2_driver_id'] if user_prediction else '' }}">
+    <input type="hidden" name="p3" id="f_p3" value="{{ user_prediction['p3_driver_id'] if user_prediction else '' }}">
+    <input type="hidden" name="sc_conviction" id="f_sc" value="{{ sc_vote['conviction'] if sc_vote else 0 }}">
+
+    <div class="vote">
+      <div class="slots" id="slots"
+           data-votable="{{ 1 if votable else 0 }}"
+           data-anon="{{ 1 if anonymous else 0 }}"
+           data-login="{{ url_for('login') }}">
+        {% for pos in [2, 1, 3] %}
+        <button type="button" class="slot {% if user_prediction %}filled locked{% else %}empty{% endif %}" data-pos="{{ pos }}">
+          {% if user_prediction %}<span class="team"></span>{% endif %}
+          <div class="in">
+            <span class="ghost">P{{ pos }}{% if not user_prediction %} &middot; Empty{% endif %}</span>
+            {% if user_prediction %}
+            <span><span class="code">{{ (user_prediction['p' ~ pos ~ '_code'] or user_prediction['p' ~ pos ~ '_name'].split()[-1][:3])|upper }}</span><span class="nm">{{ user_prediction['p' ~ pos ~ '_name'] }}</span></span>
+            {% else %}
+            <span class="ghost">Tap to pick</span>
+            {% endif %}
+          </div>
+          <span class="posn">{{ pos }}</span>
+        </button>
+        {% endfor %}
+      </div>
+
+      <!-- safety car, directly below the podium -->
+      <div class="scblock">
+        <div class="scq">
+          <span class="lbl" style="color:var(--warn)">Second pool</span>
+          <h3>Will a Safety Car or VSC be deployed?</h3>
+          <p>Staked from your <b>safety-car pool only</b>. Sit further from the crowd for a bigger multiplier &mdash; win or lose, your podium points never move and the pool floors at zero.</p>
+        </div>
+        <div>
+          <div class="track" id="track"
+               data-consensus="{{ sc_crowd['consensus'] }}"
+               data-yes="{{ sc_crowd['yes_pct'] }}"
+               data-votes="{{ sc_crowd['votes'] }}"
+               data-pool="{{ sc_pool['pool'] }}"
+               data-min="{{ sc_min_stake }}"
+               data-locked="{{ 0 if votable else 1 }}">
+            <div class="rail2"></div>
+            <div class="fill" id="fill"></div>
+            <div class="mid"></div>
+            {% if sc_crowd['votes'] %}
+            <div class="crowd" style="left:{{ sc_crowd['yes_pct'] }}%">
+              <div class="pin"></div><div class="t">CROWD {{ sc_crowd['yes_pct'] }}% YES</div>
+            </div>
+            {% endif %}
+            <div class="knob" id="knob" style="left:50%"></div>
+            <input class="sr" id="sr" type="range" min="-100" max="100" step="1"
+                   value="{{ sc_vote['conviction'] if sc_vote else 0 }}"
+                   {% if not votable %}disabled{% endif %} aria-label="Safety car conviction">
+          </div>
+          <div class="scends">
+            <span class="lbl" style="color:var(--neg)">&#9664; Clean race</span>
+            <span class="lbl">No call</span>
+            <span class="lbl" style="color:var(--warn)">Safety car &#9654;</span>
+          </div>
+          <div class="scout">
+            <div><div class="lbl">Your call</div><div class="v" id="scCall" style="color:var(--dimmer)">&mdash;</div></div>
+            <div><div class="lbl">Stake</div><div class="v num" id="scStake">0</div></div>
+            <div><div class="lbl">Multiplier</div><div class="v num" id="scMult" style="color:var(--acc)">1.0&times;</div></div>
+          </div>
+          <p class="scnote muted" id="scNote">Sit on the fence and you stake nothing.</p>
+        </div>
+      </div>
+
+      <div class="votefoot">
+        <div>
+          <div class="lbl">Safety-car pool</div>
+          <div class="big num" id="poolNow" style="color:var(--warn)">{{ sc_pool['pool'] }}</div>
+          <div class="lbl" id="poolSwing">no stake &middot; pool untouched</div>
+        </div>
+        <div class="rule"></div>
+        {% if anonymous %}
+          <a href="{{ url_for('login') }}" class="btn"><span>Log in to vote</span></a>
+        {% elif user_prediction %}
+          <span class="lbl">Card locked &mdash; picks can't be changed once submitted</span>
+        {% elif next_race['status'] != 'open' %}
+          <span class="lbl">Cards closed for this round</span>
+        {% else %}
+          <button type="submit" class="btn is-off" id="lockbtn" disabled><span>3 to go</span></button>
         {% endif %}
-        <a href="{{ url_for('leaderboard') }}" class="btn btn-secondary">View Leaderboard</a>
-        <a href="{{ url_for('races') }}" class="btn btn-secondary">All Races</a>
+      </div>
     </div>
+  </form>
+  {% endif %}
+</section>
+
+<!-- ══ 2. THE WIRE ══ -->
+<section class="panel">
+  <div class="phead">
+    <h2>The Wire</h2>
+    <span class="tag acc">{{ crowd['total'] }} cards in</span>
+    <div class="rule"></div>
+    <span class="lbl">Where the field is leaning</span>
+  </div>
+  <div class="wiregrid">
+    <div>
+      <div class="lbl" style="margin-bottom:10px">Crowd mood &mdash; podium picks</div>
+      {% if crowd['rows'] %}
+      <div class="legend">
+        <span><i style="background:rgba(38,224,138,.5)"></i><span class="lbl">On the podium</span></span>
+        <span><i style="background:var(--acc)"></i><span class="lbl">To win</span></span>
+      </div>
+      {% for d in crowd['rows'] %}
+      <div class="dv">
+        <span class="c">{{ d['code'] }}</span>
+        <span class="g" title="{{ d['name'] }}"><b class="pod" style="width:{{ d['podium_pct'] }}%"></b><b class="win" style="width:{{ d['win_pct'] }}%"></b></span>
+        <span class="v">{{ d['podium_pct'] }}%</span>
+      </div>
+      {% endfor %}
+      {% if crowd['rows']|length > 1 %}
+      <div class="note">
+        <b>{{ crowd['rows'][0]['code'] }}</b> is the consensus call at <b>{{ crowd['rows'][0]['podium_pct'] }}%</b> of cards.
+        Backing the field pays the same as the field &mdash; the points are in the driver nobody else has.
+      </div>
+      {% endif %}
+      {% else %}
+      <p style="margin:0">No cards in for this race yet. Vote first and you set the mood.</p>
+      {% endif %}
+    </div>
+    <div>
+      <div class="lbl" style="margin-bottom:10px">Safety car</div>
+      {% if sc_crowd['votes'] %}
+      <div class="kv"><span class="big" style="color:var(--warn)">{{ sc_crowd['yes_pct'] }}%</span><span class="lbl">of calls say yes</span></div>
+      <div class="scbar"><i style="width:{{ sc_crowd['yes_pct'] }}%"></i></div>
+      <div class="lbl">{{ sc_crowd['votes'] }} calls placed this round</div>
+      {% else %}
+      <p style="margin:0 0 14px">No safety-car calls placed yet this round.</p>
+      {% endif %}
+
+      {% if sc_stats %}
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)">
+        <div class="kv"><span class="big" style="color:var(--tx)">{{ sc_stats['pct'] }}%</span><span class="lbl">season rate</span></div>
+        <div class="lbl" style="margin-top:6px">{{ sc_stats['with_sc'] }} of {{ sc_stats['races'] }} scored rounds had an SC or VSC</div>
+        {% if sc_crowd['votes'] and (sc_crowd['yes_pct'] - sc_stats['pct'])|abs >= 12 %}
+        <div class="note">
+          <b>Divergence.</b> The field is {{ (sc_crowd['yes_pct'] - sc_stats['pct'])|abs }} points
+          {% if sc_crowd['yes_pct'] > sc_stats['pct'] %}hotter{% else %}colder{% endif %}
+          on a deployment than the season has actually run. That gap is where the multiplier lives.
+        </div>
+        {% endif %}
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<!-- ══ 3. STANDINGS ══ -->
+<section class="panel">
+  <div class="phead">
+    <h2>Standings</h2>
+    {% if selected_league %}<span class="tag acc">{{ selected_league['emoji_or_color'] }} {{ selected_league['name'] }}</span>
+    {% else %}<span class="tag">Global</span>{% endif %}
+    <div class="rule"></div>
+    {% if leagues %}
+    <form method="GET" class="lsel">
+      <label for="league" style="margin:0">League</label>
+      <select id="league" name="league" onchange="this.form.submit()">
+        <option value="">Global</option>
+        {% for l in leagues %}
+        <option value="{{ l['id'] }}" {% if selected_league and selected_league['id'] == l['id'] %}selected{% endif %}>{{ l['emoji_or_color'] }} {{ l['name'] }}</option>
+        {% endfor %}
+      </select>
+    </form>
+    {% endif %}
+  </div>
+  <div class="table-scroll">
+    <table>
+      <thead><tr>
+        <th style="width:52px">Pos</th>
+        <th>Player</th>
+        <th style="width:80px;text-align:right">Podium</th>
+        <th style="width:150px">Safety-car pool</th>
+        <th style="width:76px;text-align:right">Total</th>
+      </tr></thead>
+      <tbody>
+        {% set peak = standings[0]['sc_pool'] if standings else 1 %}
+        {% for row in standings %}
+        <tr {% if user and row['session_id'] == user['session_id'] %}class="me"{% endif %}>
+          <td><span class="pos-n">{{ row['position'] }}</span></td>
+          <td><span class="who"><span class="pfp">{{ avatar_for(row) }}</span><span>{{ display_name_for(row) }}</span>
+            {% if user and row['session_id'] == user['session_id'] %}<span class="lbl" style="color:var(--acc)">you</span>{% endif %}</span></td>
+          <td style="text-align:right"><span class="num" style="font-size:12px;color:var(--dim)">{{ row['podium_points'] }}</span></td>
+          <td><span class="scmeter"><span class="m"><i style="width:{{ ((row['sc_pool'] / peak * 100)|round|int) if peak else 0 }}%"></i></span>
+            <span class="num" style="font-size:11px;color:var(--warn)">{{ row['sc_pool'] }}</span></span></td>
+          <td style="text-align:right"><span class="pts">{{ row['total'] }}</span></td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5"><span class="lbl">Nobody on the board yet.</span></td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if not anonymous %}
+  <div class="pbody btnrow" style="border-top:1px solid var(--line)">
+    {% if has_pending_results %}<a href="{{ url_for('check_results') }}" class="btn btn-sm"><span>Check results</span></a>{% endif %}
+    <a href="{{ url_for('leaderboard') }}" class="btn btn-secondary btn-sm"><span>Full standings</span></a>
+    <a href="{{ url_for('races') }}" class="btn btn-secondary btn-sm"><span>Calendar</span></a>
+    <a href="{{ url_for('leagues') }}" class="btn btn-secondary btn-sm"><span>Leagues</span></a>
+  </div>
+  {% endif %}
+</section>
+
+{% if anonymous %}
+<section class="panel">
+  <div class="phead"><h2>Get on the Board</h2><div class="rule"></div><span class="lbl">Takes one field</span></div>
+  <div class="pbody">
+    <p>Pick a name and you're playing &mdash; no password, no inbox. Add an email later and your points follow you to any device.</p>
+    <form method="POST" action="{{ url_for('set_username') }}" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;max-width:460px">
+      <input type="text" name="username" placeholder="Pick a name" required aria-label="Your name" style="flex:1;min-width:200px">
+      <button type="submit" class="btn"><span>Start</span></button>
+    </form>
+    <p style="margin-top:12px;font-size:12px">Already have an account? <a href="{{ url_for('login') }}">Log in with email</a>.</p>
+  </div>
+</section>
+{% endif %}
+
+<!-- driver picker -->
+<div class="scrim" id="scrim" role="dialog" aria-modal="true" aria-labelledby="pickhead">
+  <div class="picker">
+    <div class="phead"><h2 id="pickhead">Pick <span id="pickpos">P1</span></h2><div class="rule"></div>
+      <button type="button" class="lbl" id="pickclose" style="cursor:pointer;background:none;border:0">Close &times;</button></div>
+    <div class="pickgrid" id="pickgrid">
+      {% for d in drivers %}
+      <button type="button" class="dchip" data-id="{{ d['id'] }}"
+              data-code="{{ (d['code'] or d['name'].split()[-1][:3])|upper }}"
+              data-name="{{ d['name'] }}" data-num="{{ d['number'] }}" data-team="{{ d['team'] or '' }}">
+        <i></i><span class="c">{{ (d['code'] or d['name'].split()[-1][:3])|upper }}</span>
+        <span class="n">{{ d['name'] }}</span><span class="no">{{ d['number'] }}</span>
+      </button>
+      {% endfor %}
+    </div>
+  </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function(){
+  var TEAM = {'red bull':'#3671C6','rb':'#6692FF','racing bulls':'#6692FF','mclaren':'#FF8000',
+    'ferrari':'#E8002D','mercedes':'#27F4D2','aston martin':'#229971','alpine':'#FF87BC',
+    'williams':'#64C4FF','sauber':'#52E252','kick sauber':'#52E252','haas':'#B6BABD','audi':'#52E252'};
+  function colour(t){ t=(t||'').toLowerCase(); for(var k in TEAM){ if(t.indexOf(k)>-1) return TEAM[k]; } return '#7C859E'; }
+
+  /* ── countdown ── */
+  var cd = document.getElementById('cd');
+  if(cd){
+    var raw = (cd.dataset.start||'').trim().replace(' ','T');
+    if(raw && !/[Zz]|[+-]\d{2}:?\d{2}$/.test(raw)) raw += 'Z';
+    var start = new Date(raw);
+    if(!isNaN(start)){
+      var bar = document.getElementById('lockbar'), SEG = 56;
+      for(var i=0;i<SEG;i++) bar.appendChild(document.createElement('i'));
+      var seg = bar.children, WINDOW = 7*864e5;
+      var pad = function(n){ return String(n).padStart(2,'0'); };
+      var tick = function(){
+        var left = Math.max(0, Math.floor((start - Date.now())/1000));
+        document.getElementById('cdd').textContent = pad(Math.floor(left/86400));
+        document.getElementById('cdh').textContent = pad(Math.floor(left%86400/3600));
+        document.getElementById('cdm').textContent = pad(Math.floor(left%3600/60));
+        document.getElementById('cds').textContent = pad(left%60);
+        var done = Math.round(Math.min(1, Math.max(0, 1 - (left*1000)/WINDOW)) * SEG);
+        for(var i=0;i<SEG;i++) seg[i].className = i < done ? 'f' : '';
+      };
+      tick(); setInterval(tick, 1000);
+    }
+  }
+
+  var slots = document.getElementById('slots');
+  if(!slots) return;
+  var votable = slots.dataset.votable === '1';
+  var anon = slots.dataset.anon === '1';
+  var loginUrl = slots.dataset.login;
+
+  /* colour the team bars on an already-locked card */
+  [].forEach.call(document.querySelectorAll('.slot.filled .team'), function(el){ el.style.background = 'var(--acc)'; });
+
+  /* ── driver picker ── */
+  var scrim = document.getElementById('scrim');
+  var chips = [].slice.call(document.querySelectorAll('.dchip'));
+  chips.forEach(function(c){ c.querySelector('i').style.background = colour(c.dataset.team); });
+  var byId = {}; chips.forEach(function(c){ byId[c.dataset.id] = c.dataset; });
+  var picks = {1:null, 2:null, 3:null}, activePos = null;
+
+  function openPicker(pos){
+    if(anon){ window.location.href = loginUrl; return; }
+    if(!votable) return;
+    activePos = pos;
+    document.getElementById('pickpos').textContent = 'P' + pos;
+    chips.forEach(function(c){
+      var takenElsewhere = [1,2,3].some(function(p){ return p !== pos && picks[p] === c.dataset.id; });
+      c.disabled = takenElsewhere;
+    });
+    scrim.classList.add('on');
+  }
+  function closePicker(){ scrim.classList.remove('on'); activePos = null; }
+  document.getElementById('pickclose').addEventListener('click', closePicker);
+  scrim.addEventListener('click', function(e){ if(e.target === scrim) closePicker(); });
+  document.addEventListener('keydown', function(e){ if(e.key === 'Escape') closePicker(); });
+  chips.forEach(function(c){
+    c.addEventListener('click', function(){
+      if(activePos == null) return;
+      picks[activePos] = c.dataset.id;
+      closePicker(); paint();
+    });
+  });
+
+  [].forEach.call(slots.querySelectorAll('.slot'), function(s){
+    s.addEventListener('click', function(){
+      var pos = +s.dataset.pos;
+      if(picks[pos] && votable){ picks[pos] = null; paint(); return; }
+      openPicker(pos);
+    });
+  });
+
+  function paint(){
+    [1,2,3].forEach(function(pos){
+      var s = slots.querySelector('.slot[data-pos="'+pos+'"]');
+      var d = byId[picks[pos]];
+      document.getElementById('f_p'+pos).value = picks[pos] || '';
+      if(d){
+        s.className = 'slot filled';
+        s.innerHTML = '<span class="team" style="background:'+colour(d.team)+'"></span>'+
+          '<div class="in"><span class="ghost">P'+pos+' &middot; #'+d.num+'</span>'+
+          '<span><span class="code">'+d.code+'</span><span class="nm">'+d.name+'</span></span></div>'+
+          '<span class="posn">'+pos+'</span>';
+      } else {
+        s.className = 'slot empty';
+        s.innerHTML = '<div class="in"><span class="ghost">P'+pos+' &middot; Empty</span>'+
+          '<span class="ghost">Tap to pick</span></div><span class="posn">'+pos+'</span>';
+      }
+    });
+    var n = [picks[1],picks[2],picks[3]].filter(Boolean).length;
+    var btn = document.getElementById('lockbtn');
+    if(btn){
+      btn.disabled = n < 3;
+      btn.classList.toggle('is-off', n < 3);
+      btn.querySelector('span').textContent = n < 3 ? (3-n)+' to go' : 'Lock in votes';
+    }
+  }
+  if(votable) paint();
+
+  /* ── safety car slider ── */
+  var track = document.getElementById('track'), sr = document.getElementById('sr');
+  if(track && sr){
+    var CROWD = parseInt(track.dataset.consensus, 10) || 0;
+    var VOTES = parseInt(track.dataset.votes, 10) || 0;
+    var POOL = parseInt(track.dataset.pool, 10) || 0;
+    var MIN = parseInt(track.dataset.min, 10) || 6;
+    var locked = track.dataset.locked === '1';
+    function sc(){
+      var v = +sr.value, a = Math.abs(v);
+      document.getElementById('knob').style.left = ((v+100)/2) + '%';
+      var f = document.getElementById('fill');
+      if(v >= 0){ f.className='fill'; f.style.left='50%'; f.style.width=(a/2)+'%'; }
+      else { f.className='fill no'; f.style.left=(50-a/2)+'%'; f.style.width=(a/2)+'%'; }
+      var staked = a >= MIN;
+      var mult = staked ? (1 + Math.abs(v-CROWD)/200*3.4 + a/260) : 1;
+      var swing = staked ? Math.round(a * mult) : 0;
+      var call = document.getElementById('scCall');
+      call.textContent = staked ? (v > 0 ? 'SAFETY CAR' : 'CLEAN RACE') : '—';
+      call.style.color = staked ? (v > 0 ? 'var(--warn)' : 'var(--neg)') : 'var(--dimmer)';
+      document.getElementById('scStake').textContent = staked ? a : 0;
+      document.getElementById('scMult').textContent = mult.toFixed(1) + '×';
+      document.getElementById('f_sc').value = v;
+      document.getElementById('poolSwing').innerHTML = swing
+        ? 'win <span style="color:var(--pos)">'+(POOL+swing)+'</span> · lose <span style="color:var(--neg)">'+Math.max(0, POOL-swing)+'</span>'
+        : 'no stake · pool untouched';
+      var note = document.getElementById('scNote');
+      if(locked){
+        note.innerHTML = staked
+          ? 'Call is in at <b style="color:var(--acc)">'+mult.toFixed(1)+'×</b> on a '+a+' stake. It settles when the result lands.'
+          : 'No safety-car call on this card.';
+      } else if(!staked){
+        note.textContent = 'Sit on the fence and you stake nothing — the pool neither grows nor shrinks.';
+      } else if(!VOTES){
+        note.innerHTML = 'First call of the round, so there is no crowd to price against yet: <b style="color:var(--acc)">'+mult.toFixed(1)+'×</b> on a '+a+' stake.';
+      } else if((v > 0) !== (CROWD > 0)){
+        note.innerHTML = 'You are <b style="color:var(--acc)">'+Math.round(Math.abs(v-CROWD))+' points against the crowd</b>. That is where the multiplier comes from — and a miss only ever drains this pool.';
+      } else {
+        note.innerHTML = 'Roughly with the crowd. Safe, and it pays like it: <b style="color:var(--acc)">'+mult.toFixed(1)+'×</b>.';
+      }
+    }
+    sr.addEventListener('input', sc);
+    sc();
+  }
+})();
+</script>
 {% endblock %}

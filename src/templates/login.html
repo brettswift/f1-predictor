@@ -1,28 +1,20 @@
 {% extends "base.html" %}
-
-{% block title %}Login - F1 Predictor{% endblock %}
-
+{% block title %}Log in - F1 Predictor{% endblock %}
 {% block content %}
-<div class="card" style="text-align: center; margin-top: 50px;">
-    <h1 style="font-size: 48px; margin-bottom: 10px;">✉️</h1>
-    <h1>Log in with email</h1>
-    <p style="font-size: 18px; margin: 30px 0;">
-        Enter your email address and we'll send you a magic link to log in. No password needed.
-    </p>
-
-    <form method="POST" action="{{ url_for('login_request') }}" style="max-width: 400px; margin: 0 auto;">
-        <input type="email" name="email" placeholder="you@example.com" required autofocus>
-        <button type="submit" class="btn" style="width: 100%;">Send Magic Link</button>
+<section class="panel centered">
+  <div class="phead"><h2>Log In</h2><div class="rule"></div><span class="lbl">Magic link</span></div>
+  <div class="pbody">
+    <p>Give us an email and we'll send a one-time link. No password to remember, and your points follow you to any device.</p>
+    <form method="POST" action="{{ url_for('login_request') }}" style="margin-top:18px">
+      <div class="field">
+        <label for="email">Email</label>
+        <input type="email" id="email" name="email" placeholder="you@example.com" required autofocus>
+      </div>
+      <button type="submit" class="btn" style="width:100%"><span>Send magic link</span></button>
     </form>
-
-    <div style="margin-top: 20px;">
-        <a href="{{ url_for('login_oauth_google') }}" class="btn" style="background: #4285F4; width: 100%; max-width: 400px;">
-            Sign in with Google
-        </a>
-    </div>
-
-    <p style="margin-top: 30px; opacity: 0.6; font-size: 14px;">
-        Prefer to stay anonymous? <a href="{{ url_for('index') }}" style="color: #fff; text-decoration: underline;">Enter a username instead</a>.
-    </p>
-</div>
+    <div style="display:flex;align-items:center;gap:12px;margin:18px 0"><div class="rule"></div><span class="lbl">or</span><div class="rule"></div></div>
+    <a href="{{ url_for('login_oauth_google') }}" class="btn btn-secondary" style="width:100%"><span>Continue with Google</span></a>
+    <p style="margin-top:20px;font-size:12px">Rather stay anonymous? <a href="{{ url_for('index') }}">Just pick a name</a>.</p>
+  </div>
+</section>
 {% endblock %}

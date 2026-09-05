@@ -1,89 +1,96 @@
 {% extends "base.html" %}
 
-{% block title %}Races - F1 Predictor{% endblock %}
+{% block title %}Calendar - F1 Predictor{% endblock %}
+
+{% block extra_css %}
+<style>
+.rnd{font-family:var(--cond);font-weight:700;font-size:19px;color:var(--dimmer);min-width:26px;display:inline-block}
+.rname{font-family:var(--cond);font-weight:600;font-size:17px;letter-spacing:.02em}
+.trio{font-family:var(--mono);font-size:10.5px;line-height:1.65;color:var(--dim);white-space:nowrap}
+.trio b{color:var(--tx);font-weight:500}
+.trio .p{color:var(--dimmer);display:inline-block;width:20px}
+</style>
+{% endblock %}
 
 {% block content %}
-<div class="card">
-    <h2>🏁 {{ f1_season }} Race Calendar</h2>
-    <p>All {{ races|length }} races of the {{ f1_season }} F1 season</p>
-</div>
-
-<div class="card">
-    <div class="table-scroll">
-    <table>
-        <thead>
-            <tr>
-                <th>Round</th>
-                <th>Race</th>
-                <th>Date</th>
-                <th>Status</th>
-                <th>Your Prediction</th>
-                <th>Result</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for race in races %}
-            <tr>
-                <td>{{ race['round'] }}</td>
-                <td><strong>{{ race['name'] }}</strong></td>
-                <td>{{ race['date'][:10] }}</td>
-                <td>
-                    {% if race['status'] == 'locked' %}
-                    <a href="{{ url_for('live_leaderboard', race_id=race['id']) }}" class="btn" style="padding: 6px 12px; font-size: 12px; background: #e10600;">🔴 Live</a>
-                    {% elif race['status'] == 'completed' %}
-                    <a href="{{ url_for('race_detail', slug=race['slug']) }}" class="btn" style="padding: 6px 12px; font-size: 12px;">View</a>
-                    {% else %}
-                    <span class="status status-{{ race['status'] }}">{{ race['status']|upper }}</span>
-                    {% endif %}
-                </td>
-                <td>
-                    {% if race['id'] in predictions %}
-                        <span style="font-size: 12px;">
-                            P1: {{ predictions[race['id']]['p1_name'].split()[-1] }}<br>
-                            P2: {{ predictions[race['id']]['p2_name'].split()[-1] }}<br>
-                            P3: {{ predictions[race['id']]['p3_name'].split()[-1] }}
-                        </span>
-                    {% elif race['status'] == 'open' %}
-                        <a href="{{ url_for('predict', race_id=race['id']) }}" class="btn" style="padding: 6px 12px; font-size: 12px;">Predict</a>
-                    {% else %}
-                        <span style="opacity: 0.5;">—</span>
-                    {% endif %}
-                </td>
-                <td>
-                    {% if race['status'] == 'completed' and race['p1_name'] %}
-                        <span style="font-size: 12px;">
-                            🥇 {{ race['p1_name'].split()[-1] }}<br>
-                            🥈 {{ race['p2_name'].split()[-1] }}<br>
-                            🥉 {{ race['p3_name'].split()[-1] }}
-                        </span>
-                    {% else %}
-                        <span style="opacity: 0.5;">TBD</span>
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-    </div>
-</div>
+<section class="panel">
+  <div class="phead">
+    <h2>{{ f1_season }} Calendar</h2>
+    <span class="tag acc">{{ races|length }} rounds</span>
+    <div class="rule"></div>
+    <span class="lbl">Picks lock at lights out</span>
+  </div>
+  <div class="table-scroll">
+  <table>
+    <thead><tr>
+      <th style="width:48px">Rnd</th>
+      <th>Race</th>
+      <th style="width:106px">Date</th>
+      <th style="width:120px">Status</th>
+      <th style="width:150px">Your card</th>
+      <th style="width:150px">Result</th>
+    </tr></thead>
+    <tbody>
+      {% for race in races %}
+      <tr>
+        <td><span class="rnd">{{ race['round'] }}</span></td>
+        <td><span class="rname">{{ race['name'] }}</span></td>
+        <td><span class="num" style="font-size:11.5px;color:var(--dim)">{{ race['date'][:10] }}</span></td>
+        <td>
+          {% if race['status'] == 'locked' %}
+            <a href="{{ url_for('live_leaderboard', race_id=race['id']) }}" class="btn btn-warn btn-sm"><span>Live</span></a>
+          {% elif race['status'] == 'completed' %}
+            <a href="{{ url_for('race_detail', slug=race['slug']) }}" class="btn btn-secondary btn-sm"><span>Recap</span></a>
+          {% else %}
+            <span class="status status-{{ race['status'] }}">{{ race['status'] }}</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if race['id'] in predictions %}
+            <span class="trio">
+              <span class="p">P1</span><b>{{ predictions[race['id']]['p1_name'].split()[-1] }}</b><br>
+              <span class="p">P2</span><b>{{ predictions[race['id']]['p2_name'].split()[-1] }}</b><br>
+              <span class="p">P3</span><b>{{ predictions[race['id']]['p3_name'].split()[-1] }}</b>
+            </span>
+          {% elif race['status'] == 'open' %}
+            <a href="{{ url_for('predict', race_id=race['id']) }}" class="btn btn-sm"><span>Predict</span></a>
+          {% else %}
+            <span class="lbl">—</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if race['status'] == 'completed' and race['p1_name'] %}
+            <span class="trio">
+              <span class="p">P1</span><b>{{ race['p1_name'].split()[-1] }}</b><br>
+              <span class="p">P2</span><b>{{ race['p2_name'].split()[-1] }}</b><br>
+              <span class="p">P3</span><b>{{ race['p3_name'].split()[-1] }}</b>
+            </span>
+          {% else %}
+            <span class="lbl">TBD</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
 
 {% if is_admin %}
-<div class="card" style="background: rgba(255, 255, 255, 0.03);">
-    <h3>Race Results</h3>
-    <p style="font-size: 14px; opacity: 0.7;">Predictions lock when the race starts. Click to check the F1 API for results (auto-retries every 2 min, max 10 times).</p>
-    <div style="margin-top: 15px;">
-        {% if has_pending_results %}
-        <a href="{{ url_for('check_results') }}" class="btn" style="margin: 5px;">Check for Race Results</a>
+<section class="panel">
+  <div class="phead"><h2>Admin</h2><span class="tag neg">Restricted</span><div class="rule"></div></div>
+  <div class="pbody">
+    <p style="font-size:12px">Predictions lock when the race starts. Results are polled from the F1 API automatically &mdash; every 2 minutes, up to 10 attempts.</p>
+    <div class="btnrow" style="margin-top:14px">
+      {% if has_pending_results %}<a href="{{ url_for('check_results') }}" class="btn btn-sm"><span>Check results</span></a>{% endif %}
+      <a href="{{ url_for('delete_predictions') }}" class="btn btn-secondary btn-sm"><span>Delete wrong predictions</span></a>
+      {% for race in races %}
+        {% if race['status'] == 'locked' and not race['p1_name'] %}
+        <a href="{{ url_for('enter_results', race_id=race['id']) }}" class="btn btn-secondary btn-sm"><span>Enter: {{ race['name'].split()[0] }}</span></a>
         {% endif %}
-        <a href="{{ url_for('delete_predictions') }}" class="btn btn-secondary" style="margin: 5px; font-size: 12px; padding: 6px 12px;">Delete wrong predictions</a>
-        {% for race in races %}
-            {% if race['status'] == 'locked' and not race['p1_name'] %}
-                <a href="{{ url_for('enter_results', race_id=race['id']) }}" class="btn btn-secondary" style="margin: 5px; font-size: 12px; padding: 6px 12px;">
-                    Enter Results: {{ race['name'].split()[0] }}
-                </a>
-            {% endif %}
-        {% endfor %}
+      {% endfor %}
     </div>
-</div>
+  </div>
+</section>
 {% endif %}
 {% endblock %}

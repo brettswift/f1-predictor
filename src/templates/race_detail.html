@@ -7,212 +7,97 @@
 
 {% block extra_css %}
 <style>
-    /* Mobile-responsive styles */
-    @media (max-width: 480px) {
-        .race-header-inner {
-            flex-direction: column;
-            align-items: flex-start !important;
-            gap: 10px;
-        }
-        
-        .race-header-inner .status {
-            margin-left: 0 !important;
-            margin-top: 5px;
-        }
-        
-        .table-scroll {
-            overflow-x: auto;
-            -webkit-overflow-scrolling: touch;
-        }
-        
-        .table-scroll table {
-            min-width: 400px;
-        }
-        
-        .table-scroll th,
-        .table-scroll td {
-            padding: 8px 6px;
-            font-size: 13px;
-        }
-        
-        .podium-results {
-            flex-direction: column;
-            gap: 10px;
-        }
-        
-        .podium-item {
-            flex: 1;
-            min-width: 100px;
-        }
-        
-        .result-legend {
-            font-size: 11px !important;
-            line-height: 1.4;
-        }
-    }
-    
-    .race-header-inner {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-    }
-    
-    .table-scroll {
-        overflow-x: auto;
-    }
-    
-    .podium-results {
-        display: flex;
-        justify-content: center;
-        gap: 20px;
-        margin: 15px 0;
-    }
-    
-    .podium-item {
-        flex: 1;
-        max-width: 150px;
-        text-align: center;
-        padding: 15px 10px;
-        border-radius: 8px;
-    }
-    
-    .podium-p1 {
-        background: linear-gradient(135deg, rgba(255, 215, 0, 0.2), rgba(255, 215, 0, 0.05));
-    }
-    
-    .podium-p2 {
-        background: linear-gradient(135deg, rgba(192, 192, 192, 0.2), rgba(192, 192, 192, 0.05));
-    }
-    
-    .podium-p3 {
-        background: linear-gradient(135deg, rgba(205, 127, 50, 0.2), rgba(205, 127, 50, 0.05));
-    }
-    
-    .podium-rank {
-        font-size: 24px;
-        margin-bottom: 5px;
-    }
-    
-    .podium-name {
-        font-size: 14px;
-        font-weight: bold;
-    }
-    
-    .result-legend {
-        font-size: 12px;
-        opacity: 0.7;
-        margin-top: 12px;
-    }
-    
-    .exact {
-        color: #e10600;
-        font-weight: bold;
-    }
-    
-    .close {
-        color: #ff8c00;
-    }
-    
-    .points-col {
-        min-width: 50px;
-    }
+.rhead{padding:20px 18px;background:linear-gradient(180deg,rgba(176,140,255,.05),transparent 72%)}
+.rhead .top{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.rn{font-family:var(--mono);font-size:10px;letter-spacing:.14em;color:var(--acc);
+  border:1px solid rgba(176,140,255,.32);padding:3px 7px;border-radius:3px}
+.exact{color:var(--pos);font-weight:600}
+.near{color:var(--warn)}
+.miss{color:var(--dimmer)}
+.key{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin-top:14px}
+.key span{display:flex;align-items:center;gap:6px}
+.key i{width:7px;height:7px;border-radius:50%;display:block}
+.ptcell{font-family:var(--mono);font-size:13px;font-weight:600}
+.dname{font-family:var(--mono);font-size:12px}
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="card">
-    <div class="race-header-inner">
-        <div>
-            <h2>🏁 {{ race['name'] }}</h2>
-            <p style="margin-top: 5px;">
-                Round {{ race['round'] }} · {{ race['date'][:10] }}
-            </p>
-        </div>
-        <span class="status status-{{ race['status'] }}">{{ race['status']|upper }}</span>
-    </div>
-</div>
+<section class="panel rhead">
+  <div class="top">
+    <span class="rn num">R{{ race['round'] }}</span>
+    <h1>{{ race['name'] }}</h1>
+    <span class="status status-{{ race['status'] }}">{{ race['status'] }}</span>
+  </div>
+  <div class="lbl" style="margin-top:10px">{{ race['date'][:10] }} · {{ f1_season }} season</div>
+</section>
 
 {% if result_names %}
-<div class="card">
-    <h3>Result</h3>
-    <div class="podium-results">
-        <div class="podium-item podium-p1">
-            <div class="podium-rank">🥇</div>
-            <div class="podium-name">{{ result_names['p1_name'] }}</div>
-        </div>
-        <div class="podium-item podium-p2">
-            <div class="podium-rank">🥈</div>
-            <div class="podium-name">{{ result_names['p2_name'] }}</div>
-        </div>
-        <div class="podium-item podium-p3">
-            <div class="podium-rank">🥉</div>
-            <div class="podium-name">{{ result_names['p3_name'] }}</div>
-        </div>
+<section class="panel">
+  <div class="phead"><h2>Result</h2><span class="tag pos">Final</span><div class="rule"></div></div>
+  <div class="pbody">
+    <div class="podium">
+      <div class="pslot" data-pos="2"><span class="bar"></span><div class="in">
+        <span class="sub">P2</span><span class="who">{{ result_names['p2_name'].split()[-1] }}</span></div><span class="ghost">2</span></div>
+      <div class="pslot" data-pos="1"><span class="bar"></span><div class="in">
+        <span class="sub">P1</span><span class="who">{{ result_names['p1_name'].split()[-1] }}</span></div><span class="ghost">1</span></div>
+      <div class="pslot" data-pos="3"><span class="bar"></span><div class="in">
+        <span class="sub">P3</span><span class="who">{{ result_names['p3_name'].split()[-1] }}</span></div><span class="ghost">3</span></div>
     </div>
-    <p class="result-legend">
-        <span class="exact">● Red</span> = exact · <span class="close">● Orange</span> = right driver, wrong position
-        · P1=10 · P2=6 · P3=4 · +1 bonus
-    </p>
-</div>
+  </div>
+</section>
 {% endif %}
 
-<div class="card">
-    <h3>Predictions ({{ predictions|length }} voters)</h3>
-    <div class="table-scroll">
-        <table>
-            <thead>
-                <tr>
-                    <th>User</th>
-                    <th>P1</th>
-                    <th>P2</th>
-                    <th>P3</th>
-                    {% if result_names %}
-                    <th class="points-col">Pts</th>
-                    {% endif %}
-                </tr>
-            </thead>
-            <tbody>
-                {% for pred in predictions %}
-                <tr>
-                    <td><strong>{{ avatar_for(pred) }} {{ display_name_for(pred) }}</strong></td>
-                    <td>
-                        {% if result_ids and pred['p1_driver_id'] == result_ids.get('p1_driver_id') %}
-                        <span class="exact">{{ pred['p1_name'].split()[-1] }}</span>
-                        {% elif result_ids and (pred['p1_driver_id'] == result_ids.get('p2_driver_id') or pred['p1_driver_id'] == result_ids.get('p3_driver_id')) %}
-                        <span class="close">{{ pred['p1_name'].split()[-1] }}</span>
-                        {% else %}
-                        {{ pred['p1_name'].split()[-1] }}
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if result_ids and pred['p2_driver_id'] == result_ids.get('p2_driver_id') %}
-                        <span class="exact">{{ pred['p2_name'].split()[-1] }}</span>
-                        {% elif result_ids and (pred['p2_driver_id'] == result_ids.get('p1_driver_id') or pred['p2_driver_id'] == result_ids.get('p3_driver_id')) %}
-                        <span class="close">{{ pred['p2_name'].split()[-1] }}</span>
-                        {% else %}
-                        {{ pred['p2_name'].split()[-1] }}
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if result_ids and pred['p3_driver_id'] == result_ids.get('p3_driver_id') %}
-                        <span class="exact">{{ pred['p3_name'].split()[-1] }}</span>
-                        {% elif result_ids and (pred['p3_driver_id'] == result_ids.get('p1_driver_id') or pred['p3_driver_id'] == result_ids.get('p2_driver_id')) %}
-                        <span class="close">{{ pred['p3_name'].split()[-1] }}</span>
-                        {% else %}
-                        {{ pred['p3_name'].split()[-1] }}
-                        {% endif %}
-                    </td>
-                    {% if result_names %}
-                    <td class="points-col">{{ scores_by_user.get(pred['user_id'], '—') }}</td>
-                    {% endif %}
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
+<section class="panel">
+  <div class="phead">
+    <h2>Every Card</h2>
+    <span class="tag acc">{{ predictions|length }} entries</span>
+    <div class="rule"></div>
+    <span class="lbl">10 / 6 / 4 exact · 1 for the wrong step</span>
+  </div>
+  {% if result_names %}
+  <div class="pbody" style="padding-bottom:0">
+    <div class="key">
+      <span><i style="background:var(--pos)"></i><span class="lbl">Exact call</span></span>
+      <span><i style="background:var(--warn)"></i><span class="lbl">Right driver, wrong step</span></span>
+      <span><i style="background:#3E4354"></i><span class="lbl">Missed</span></span>
     </div>
-</div>
+  </div>
+  {% endif %}
+  <div class="table-scroll">
+    <table>
+      <thead><tr>
+        <th>Player</th><th style="width:110px">P1</th><th style="width:110px">P2</th><th style="width:110px">P3</th>
+        {% if result_names %}<th style="width:60px;text-align:right">Pts</th>{% endif %}
+      </tr></thead>
+      <tbody>
+        {% for pred in predictions %}
+        <tr>
+          <td>{{ avatar_for(pred) }} {{ display_name_for(pred) }}</td>
+          {% for pos in [1, 2, 3] %}
+          {% set picked = pred['p' ~ pos ~ '_driver_id'] %}
+          {% set others = [1, 2, 3] | reject('equalto', pos) | list %}
+          <td class="dname">
+            {% if result_ids and picked == result_ids.get('p' ~ pos ~ '_driver_id') %}
+              <span class="exact">{{ pred['p' ~ pos ~ '_name'].split()[-1] }}</span>
+            {% elif result_ids and (picked == result_ids.get('p' ~ others[0] ~ '_driver_id') or picked == result_ids.get('p' ~ others[1] ~ '_driver_id')) %}
+              <span class="near">{{ pred['p' ~ pos ~ '_name'].split()[-1] }}</span>
+            {% elif result_ids %}
+              <span class="miss">{{ pred['p' ~ pos ~ '_name'].split()[-1] }}</span>
+            {% else %}
+              {{ pred['p' ~ pos ~ '_name'].split()[-1] }}
+            {% endif %}
+          </td>
+          {% endfor %}
+          {% if result_names %}
+          <td style="text-align:right"><span class="ptcell">{{ scores_by_user.get(pred['user_id'], '—') }}</span></td>
+          {% endif %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
 
-<p>
-    <a href="{{ url_for('races') }}" class="btn btn-secondary">← Back to Races</a>
-</p>
+<div class="btnrow"><a href="{{ url_for('races') }}" class="btn btn-secondary"><span>Back to calendar</span></a></div>
 {% endblock %}

@@ -6,7 +6,7 @@
 <style>
     .live-badge {
         display: inline-block;
-        background: #e10600;
+        background: var(--acc);
         color: #fff;
         padding: 4px 12px;
         border-radius: 12px;
@@ -22,16 +22,16 @@
 
     .countdown {
         font-size: 14px;
-        color: #e10600;
+        color: var(--acc);
         font-weight: bold;
     }
 
     .race-card {
-        background: rgba(255, 255, 255, 0.05);
+        background: var(--panel2);
         border-radius: 8px;
         padding: 15px;
         margin-bottom: 15px;
-        border: 1px solid rgba(255, 255, 255, 0.1);
+        border: 1px solid var(--line2);
     }
 
     .race-header {
@@ -65,14 +65,14 @@
     }
 
     .points-badge {
-        background: rgba(255, 255, 255, 0.1);
+        background: var(--line2);
         padding: 2px 8px;
         border-radius: 10px;
         font-size: 12px;
     }
 
     .points-earned {
-        background: #00c853;
+        background: var(--pos);
         color: #000;
         padding: 2px 8px;
         border-radius: 10px;
@@ -85,7 +85,7 @@
         justify-content: space-between;
         align-items: center;
         padding: 8px 0;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        border-bottom: 1px solid var(--line2);
     }
 
     .leaderboard-row:last-child {
@@ -104,11 +104,11 @@
 
     .leaderboard-score {
         font-weight: bold;
-        color: #e10600;
+        color: var(--acc);
     }
 
     .user-row {
-        background: rgba(225, 6, 0, 0.2);
+        background: rgba(176,140,255,.16);
         border-radius: 4px;
         padding: 8px;
     }
@@ -124,7 +124,7 @@
             <p style="opacity: 0.7; margin-top: 5px;">{{ season }} Season · Auto-refreshes every {{ refresh_interval }}s</p>
         </div>
         <div style="text-align: right;">
-            <div style="font-size: 24px; font-weight: bold; color: #e10600;">{{ user_total }}</div>
+            <div style="font-size: 24px; font-weight: bold; color: var(--acc);">{{ user_total }}</div>
             <div style="font-size: 12px; opacity: 0.7;">Your Total Points</div>
         </div>
     </div>

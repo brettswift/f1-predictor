@@ -1,56 +1,67 @@
 {% extends "base.html" %}
-
 {% block title %}Profile - F1 Predictor{% endblock %}
 
+{% block extra_css %}
+<style>
+.avatars{display:flex;flex-wrap:wrap;gap:8px}
+.avatars label{display:inline-flex;align-items:center;gap:7px;background:var(--panel2);border:1px solid var(--line2);
+  border-radius:2px;padding:8px 12px;cursor:pointer;margin:0;font-family:var(--sans);font-size:16px;
+  letter-spacing:0;text-transform:none;color:var(--tx);transition:.14s}
+.avatars label:hover{border-color:var(--acc);background:var(--raise)}
+.avatars input{accent-color:var(--acc)}
+.avatars .cap{font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--dimmer)}
+</style>
+{% endblock %}
+
 {% block content %}
-<div class="card">
-    <h2>{{ avatar_for(user) }} Your Profile</h2>
-    <p>Set a display name, avatar, and favorite driver. All fields are optional.</p>
-</div>
+<section class="panel">
+  <div class="phead">
+    <h2>Profile</h2>
+    <div class="rule"></div>
+    <span class="lbl">{{ avatar_for(user) }} {{ display_name_for(user) }}</span>
+  </div>
+  <form method="POST" action="{{ url_for('profile') }}">
+    <div class="pbody">
+      <div class="field">
+        <label for="display_name">Display name</label>
+        <input type="text" id="display_name" name="display_name" maxlength="40"
+               placeholder="{{ user['username'] }}" value="{{ user['display_name'] or '' }}">
+        <p class="hint">Shown on the standings and every pick list. Leave it blank to keep using <strong style="color:var(--tx)">{{ user['username'] }}</strong>.</p>
+      </div>
 
-<div class="card">
-    <form method="POST" action="{{ url_for('profile') }}">
-        <div style="margin-bottom: 25px;">
-            <label style="display: block; margin-bottom: 8px; font-weight: 500;">Display name</label>
-            <input type="text" name="display_name" maxlength="40"
-                   placeholder="{{ user['username'] }}"
-                   value="{{ user['display_name'] or '' }}">
-            <p style="font-size: 13px; opacity: 0.7; margin-top: -10px;">
-                Shown on the leaderboard and prediction lists instead of your username.
-                Leave blank to keep using <strong>{{ user['username'] }}</strong>.
-            </p>
+      <div class="field">
+        <label>Avatar</label>
+        <div class="avatars">
+          <label>
+            <input type="radio" name="avatar_emoji" value="" {% if not user['avatar_emoji'] %}checked{% endif %}>
+            <span>{{ avatar_for(user) }}</span><span class="cap">Default</span>
+          </label>
+          {% for emoji in avatar_choices %}
+          <label>
+            <input type="radio" name="avatar_emoji" value="{{ emoji }}" {% if user['avatar_emoji'] == emoji %}checked{% endif %}>
+            <span>{{ emoji }}</span>
+          </label>
+          {% endfor %}
         </div>
+      </div>
 
-        <div style="margin-bottom: 25px;">
-            <label style="display: block; margin-bottom: 8px; font-weight: 500;">Avatar</label>
-            <div style="display: flex; flex-wrap: wrap; gap: 10px;">
-                <label style="display: inline-flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.2); border-radius: 6px; padding: 8px 12px; cursor: pointer;">
-                    <input type="radio" name="avatar_emoji" value="" {% if not user['avatar_emoji'] %}checked{% endif %}>
-                    <span>{{ avatar_for(user) }} Default</span>
-                </label>
-                {% for emoji in avatar_choices %}
-                <label style="display: inline-flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.2); border-radius: 6px; padding: 8px 12px; cursor: pointer;">
-                    <input type="radio" name="avatar_emoji" value="{{ emoji }}" {% if user['avatar_emoji'] == emoji %}checked{% endif %}>
-                    <span style="font-size: 18px;">{{ emoji }}</span>
-                </label>
-                {% endfor %}
-            </div>
-        </div>
+      <div class="field">
+        <label for="favorite_driver_id">Favourite driver</label>
+        <select id="favorite_driver_id" name="favorite_driver_id">
+          <option value="">No favourite</option>
+          {% for driver in drivers %}
+          <option value="{{ driver['id'] }}" {% if user['favorite_driver_id'] == driver['id'] %}selected{% endif %}>
+            #{{ driver['number'] }} {{ driver['name'] }}{% if driver['team'] %} ({{ driver['team'] }}){% endif %}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
 
-        <div style="margin-bottom: 25px;">
-            <label style="display: block; margin-bottom: 8px; font-weight: 500;">Favorite driver</label>
-            <select name="favorite_driver_id">
-                <option value="">No favorite</option>
-                {% for driver in drivers %}
-                <option value="{{ driver['id'] }}" {% if user['favorite_driver_id'] == driver['id'] %}selected{% endif %}>
-                    #{{ driver['number'] }} {{ driver['name'] }}{% if driver['team'] %} ({{ driver['team'] }}){% endif %}
-                </option>
-                {% endfor %}
-            </select>
-        </div>
-
-        <button type="submit" class="btn">Save Profile</button>
-        <a href="{{ url_for('home') }}" class="btn btn-secondary">Cancel</a>
-    </form>
-</div>
+    <div class="pbody btnrow" style="border-top:1px solid var(--line)">
+      <button type="submit" class="btn"><span>Save profile</span></button>
+      <a href="{{ url_for('home') }}" class="btn btn-secondary"><span>Cancel</span></a>
+    </div>
+  </form>
+</section>
 {% endblock %}

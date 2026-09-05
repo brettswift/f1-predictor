@@ -1,18 +1,12 @@
 {% extends "base.html" %}
-
-{% block title %}Check Your Email - F1 Predictor{% endblock %}
-
+{% block title %}Check your email - F1 Predictor{% endblock %}
 {% block content %}
-<div class="card" style="text-align: center; margin-top: 50px;">
-    <h1 style="font-size: 48px; margin-bottom: 10px;">📬</h1>
-    <h1>Magic link sent</h1>
-    <p style="font-size: 18px; margin: 30px 0;">
-        If <strong>{{ email }}</strong> is valid, a one-time login link has been sent.
-        Check your inbox (and spam folder) and click the link to log in.
-    </p>
-    <p style="opacity: 0.6; font-size: 14px;">
-        The link expires in 15 minutes and can only be used once.
-    </p>
-    <a href="{{ url_for('index') }}" class="btn btn-secondary" style="margin-top: 20px;">Back to home</a>
-</div>
+<section class="panel centered">
+  <div class="phead"><h2>Link Sent</h2><span class="tag pos">Check your inbox</span><div class="rule"></div></div>
+  <div class="pbody">
+    <p>If <strong style="color:var(--tx)">{{ email }}</strong> is a real address, a one-time login link is on its way. Check spam if it's slow.</p>
+    <p class="lbl" style="margin-top:14px">Expires in 15 minutes · single use</p>
+    <div class="btnrow" style="margin-top:20px"><a href="{{ url_for('index') }}" class="btn btn-secondary"><span>Back</span></a></div>
+  </div>
+</section>
 {% endblock %}

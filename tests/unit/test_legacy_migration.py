@@ -78,7 +78,7 @@ class TestMigrationPromptFlow:
         response = client.get('/home')
         assert response.status_code == 200
         content = response.data.decode('utf-8')
-        assert 'Secure your predictions' in content
+        assert 'Secure your picks' in content
         assert 'migrate/send' in content
 
     def test_new_anonymous_user_does_not_see_banner(self, app, client):
@@ -88,7 +88,7 @@ class TestMigrationPromptFlow:
         response = client.get('/home')
         assert response.status_code == 200
         content = response.data.decode('utf-8')
-        assert 'Secure your predictions' not in content
+        assert 'Secure your picks' not in content
 
     def test_email_user_does_not_see_banner(self, app, client):
         """Users with email do not see the migration banner."""
@@ -107,7 +107,7 @@ class TestMigrationPromptFlow:
         response = client.get('/home')
         assert response.status_code == 200
         content = response.data.decode('utf-8')
-        assert 'Secure your predictions' not in content
+        assert 'Secure your picks' not in content
 
     def test_migrate_page_renders_for_legacy_user(self, app, client):
         """The dedicated migration page prompts legacy users."""
@@ -126,7 +126,7 @@ class TestMigrationPromptFlow:
         response = client.get('/migrate')
         assert response.status_code == 200
         content = response.data.decode('utf-8')
-        assert 'Keep your predictions safe' in content
+        assert 'Secure Your Picks' in content
         assert 'migrate/send' in content
 
     def test_migrate_page_redirects_email_user(self, app, client):

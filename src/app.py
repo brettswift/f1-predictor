@@ -274,6 +274,22 @@ def init_db():
         )
     ''')
 
+    # Safety-car calls (BUD / Undercut). Conviction is -100..100: the sign is
+    # the call (negative = clean race, positive = safety car), the magnitude is
+    # the stake. The multiplier is frozen at vote time from the crowd position
+    # so a later swing in consensus cannot re-price a bet already placed.
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS sc_votes (
+            user_id TEXT NOT NULL,
+            race_id INTEGER NOT NULL,
+            conviction INTEGER NOT NULL,
+            multiplier REAL NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, race_id),
+            FOREIGN KEY (race_id) REFERENCES races(id)
+        )
+    ''')
+
     # League membership - the creating admin is inserted here immediately
     # (BUD-150); BUD-151 adds the invite/join flow on top of this shape.
     db.execute('''
@@ -1375,11 +1391,16 @@ def get_user_leagues(db, user_id):
 
 @app.route('/')
 def index():
-    """Landing page - redirect to home if logged in, else show username form."""
+    """Landing page. Signed in goes to the desk; visitors see it read-only.
+
+    The desk is worth reading without an account - crowd mood, the safety-car
+    picture, the standings - so a visitor gets the whole page and is only sent
+    to log in at the point they try to place a call.
+    """
     user = get_current_user()
     if user:
         return redirect(url_for('home'))
-    return render_template('index.html')
+    return render_template('home.html', anonymous=True, **build_desk(get_db(), None))
 
 @app.route('/set-username', methods=['POST'])
 def set_username():
@@ -1414,14 +1435,239 @@ def set_username():
     session.permanent = True
     return redirect(url_for('home'))
 
-@app.route('/home')
-def home():
-    """Home page showing upcoming race and user's predictions."""
-    user = get_current_user()
-    if not user:
-        return redirect(url_for('index'))
 
-    db = get_db()
+# ─── Safety-car pool ───────────────────────────────────────────────────────
+# The safety-car call scores from its own pool, kept apart from podium points.
+# A losing call can only ever drain that pool - it floors at zero and never
+# touches the podium score - so a bad read costs you upside, not standing.
+
+SC_POOL_START = 100
+
+
+def sc_multiplier(conviction, consensus):
+    """Price a call against the crowd. Contrarian and confident pays more."""
+    if abs(conviction) < SC_MIN_STAKE:
+        return 1.0
+    distance = abs(conviction - consensus) / 200.0
+    return round(1.0 + distance * 3.4 + abs(conviction) / 260.0, 2)
+
+
+SC_MIN_STAKE = 6
+
+
+def get_sc_crowd(db, race_id):
+    """Where the field sits on this race, on the same -100..100 scale."""
+    try:
+        rows = db.execute(
+            'SELECT conviction FROM sc_votes WHERE race_id = ?', (race_id,)
+        ).fetchall()
+    except Exception:
+        return {'votes': 0, 'yes_pct': 50, 'consensus': 0}
+    if not rows:
+        return {'votes': 0, 'yes_pct': 50, 'consensus': 0}
+    yes = sum(1 for r in rows if r['conviction'] > 0)
+    yes_pct = round(yes * 100.0 / len(rows))
+    return {'votes': len(rows), 'yes_pct': yes_pct, 'consensus': yes_pct * 2 - 100}
+
+
+def _sc_settled(conviction, had_sc):
+    """True when the call matched the race."""
+    return (conviction > 0) == bool(had_sc)
+
+
+def get_sc_pool(db, user_id):
+    """Replay the season's calls in order to get the player's current pool.
+
+    Settlement is computed rather than stored: the floor at zero only makes
+    sense applied in round order, and recomputing keeps it correct if a result
+    is ever corrected after the fact.
+    """
+    if not user_id:
+        return {'pool': SC_POOL_START, 'settled': 0, 'won': 0}
+    try:
+        rows = db.execute('''
+            SELECT v.conviction AS conviction, v.multiplier AS multiplier,
+                   res.had_safety_car AS sc, res.had_virtual_safety_car AS vsc
+            FROM sc_votes v
+            JOIN races r ON r.id = v.race_id
+            JOIN results res ON res.race_id = v.race_id
+            WHERE v.user_id = ?
+            ORDER BY r.round
+        ''', (user_id,)).fetchall()
+    except Exception:
+        return {'pool': SC_POOL_START, 'settled': 0, 'won': 0}
+    pool, won = SC_POOL_START, 0
+    for r in rows:
+        swing = int(round(abs(r['conviction']) * (r['multiplier'] or 1.0)))
+        if _sc_settled(r['conviction'], (r['sc'] or 0) or (r['vsc'] or 0)):
+            pool += swing
+            won += 1
+        else:
+            pool = max(0, pool - swing)
+    return {'pool': pool, 'settled': len(rows), 'won': won}
+
+
+def get_sc_pools(db):
+    """Every player's pool in one pass, for the standings column."""
+    pools = {}
+    try:
+        rows = db.execute('''
+            SELECT v.user_id AS uid, v.conviction AS conviction,
+                   v.multiplier AS multiplier, r.round AS round,
+                   res.had_safety_car AS sc, res.had_virtual_safety_car AS vsc
+            FROM sc_votes v
+            JOIN races r ON r.id = v.race_id
+            JOIN results res ON res.race_id = v.race_id
+            ORDER BY v.user_id, r.round
+        ''').fetchall()
+    except Exception:
+        return pools
+    for r in rows:
+        uid = r['uid']
+        pool = pools.get(uid, SC_POOL_START)
+        swing = int(round(abs(r['conviction']) * (r['multiplier'] or 1.0)))
+        if _sc_settled(r['conviction'], (r['sc'] or 0) or (r['vsc'] or 0)):
+            pools[uid] = pool + swing
+        else:
+            pools[uid] = max(0, pool - swing)
+    return pools
+
+
+# ─── Race-desk data (Undercut UI) ──────────────────────────────────────────
+# Read-only aggregates that make the desk useful even when you have not voted.
+
+def get_pick_distribution(db, race_id, limit=8):
+    """Crowd mood: share of entrants backing each driver for the podium.
+
+    Real sentiment from the game itself rather than an external feed - the
+    numbers are the field's own picks for this race.
+    """
+    try:
+        total = db.execute(
+            'SELECT COUNT(*) AS c FROM predictions WHERE race_id = ?', (race_id,)
+        ).fetchone()['c']
+        if not total:
+            return {'total': 0, 'rows': []}
+        rows = db.execute('''
+            SELECT d.id AS id, d.name AS name, d.code AS code,
+                   SUM(CASE WHEN p.p1_driver_id = d.id THEN 1 ELSE 0 END) AS win_picks,
+                   COUNT(*) AS podium_picks
+            FROM predictions p
+            JOIN drivers d
+              ON d.id = p.p1_driver_id OR d.id = p.p2_driver_id OR d.id = p.p3_driver_id
+            WHERE p.race_id = ?
+            GROUP BY d.id
+            ORDER BY podium_picks DESC, win_picks DESC
+            LIMIT ?
+        ''', (race_id, limit)).fetchall()
+    except Exception:
+        return {'total': 0, 'rows': []}
+    return {
+        'total': total,
+        'rows': [{
+            'name': r['name'],
+            'code': r['code'] or (r['name'] or '').split()[-1][:3].upper(),
+            'win_pct': round(r['win_picks'] * 100.0 / total),
+            'podium_pct': round(r['podium_picks'] * 100.0 / total),
+        } for r in rows],
+    }
+
+
+def get_safety_car_stats(db):
+    """How often the season's completed races have needed an SC or VSC."""
+    try:
+        row = db.execute('''
+            SELECT COUNT(*) AS n,
+                   SUM(CASE WHEN had_safety_car = 1 OR had_virtual_safety_car = 1
+                            THEN 1 ELSE 0 END) AS sc
+            FROM results
+        ''').fetchone()
+    except Exception:
+        return None
+    n = row['n'] or 0
+    if not n:
+        return None
+    sc = row['sc'] or 0
+    return {'races': n, 'with_sc': sc, 'pct': round(sc * 100.0 / n)}
+
+
+def get_rank_and_field(db, session_id):
+    """1-indexed rank among non-synthetic players, plus the size of the field."""
+    try:
+        rows = db.execute('''
+            SELECT u.session_id AS sid, COALESCE(SUM(s.points), 0) AS total
+            FROM users u
+            LEFT JOIN scores s ON u.session_id = s.user_id
+            WHERE u.is_synthetic = 0
+            GROUP BY u.session_id
+            ORDER BY total DESC
+        ''').fetchall()
+    except Exception:
+        return None, 0
+    rank = next((i for i, r in enumerate(rows, 1) if r['sid'] == session_id), None)
+    return rank, len(rows)
+
+
+def get_recent_form(db, session_id, limit=5):
+    """Points from the player's most recent scored races, oldest first."""
+    try:
+        rows = db.execute('''
+            SELECT s.points AS points
+            FROM scores s JOIN races r ON r.id = s.race_id
+            WHERE s.user_id = ?
+            ORDER BY r.round DESC
+            LIMIT ?
+        ''', (session_id, limit)).fetchall()
+    except Exception:
+        return []
+    return [r['points'] or 0 for r in reversed(rows)]
+
+
+def get_standings(db, league=None, limit=12):
+    """Podium points, safety-car pool and total, optionally scoped to a league.
+
+    A league is a lens on the same global game: same picks, same points, just a
+    smaller field and (optionally) a later starting round.
+    """
+    args = []
+    where = ["u.is_synthetic = 0"]
+    join = ""
+    if league:
+        join = "JOIN league_members lm ON lm.user_id = u.session_id AND lm.league_id = ?"
+        args.append(league['id'])
+    round_clause = ""
+    if league and not league['whole_season'] and league['start_round']:
+        round_clause = "AND r.round >= ?"
+    try:
+        sql = f'''
+            SELECT u.*, COALESCE(SUM(s.points), 0) AS podium_points
+            FROM users u
+            {join}
+            LEFT JOIN scores s ON s.user_id = u.session_id
+            LEFT JOIN races r ON r.id = s.race_id {round_clause}
+            WHERE {" AND ".join(where)}
+            GROUP BY u.session_id
+        '''
+        if round_clause:
+            args.append(league['start_round'])
+        rows = db.execute(sql, tuple(args)).fetchall()
+    except Exception:
+        return []
+    pools = get_sc_pools(db)
+    out = []
+    for r in rows:
+        d = dict(r)
+        d['sc_pool'] = pools.get(r['session_id'], SC_POOL_START)
+        d['total'] = d['podium_points'] + d['sc_pool']
+        out.append(d)
+    out.sort(key=lambda d: d['total'], reverse=True)
+    for i, d in enumerate(out, 1):
+        d['position'] = i
+    return out
+
+
+def build_desk(db, user, league_id=None):
+    """Everything the race desk renders, for a signed-in player or a visitor."""
     next_race = get_next_open_race(db)
     if not next_race:
         races = get_races_with_computed_status(db)
@@ -1429,33 +1675,72 @@ def home():
         if next_race and next_race['status'] != 'open':
             next_race = next((r for r in races if r['status'] in ('open', 'locked')), next_race)
 
-    user_prediction = None
-    if next_race:
+    sid = user['session_id'] if user else None
+    prediction = None
+    sc_vote = None
+    if next_race and sid:
         try:
-            user_prediction = db.execute('''
-                SELECT p.*, d1.name as p1_name, d2.name as p2_name, d3.name as p3_name
+            prediction = db.execute('''
+                SELECT p.*, d1.name AS p1_name, d2.name AS p2_name, d3.name AS p3_name,
+                       d1.code AS p1_code, d2.code AS p2_code, d3.code AS p3_code
                 FROM predictions p
                 JOIN drivers d1 ON p.p1_driver_id = d1.id
                 JOIN drivers d2 ON p.p2_driver_id = d2.id
                 JOIN drivers d3 ON p.p3_driver_id = d3.id
                 WHERE p.user_id = ? AND p.race_id = ?
-            ''', (user['session_id'], next_race['id'])).fetchone()
+            ''', (sid, next_race['id'])).fetchone()
+            sc_vote = db.execute(
+                'SELECT * FROM sc_votes WHERE user_id = ? AND race_id = ?',
+                (sid, next_race['id'])).fetchone()
         except Exception:
-            user_prediction = None
+            prediction = None
 
-    total_score = db.execute(
-        'SELECT COALESCE(SUM(points), 0) as total FROM scores WHERE user_id = ?',
-        (user['session_id'],)
-    ).fetchone()['total']
+    leagues = get_user_leagues(db, sid) if sid else []
+    league = None
+    if league_id:
+        league = next((l for l in leagues if l['id'] == league_id), None)
 
-    has_pending = has_races_pending_results(db)
+    total_score = 0
+    if sid:
+        total_score = db.execute(
+            'SELECT COALESCE(SUM(points), 0) AS total FROM scores WHERE user_id = ?',
+            (sid,)).fetchone()['total']
 
-    return render_template('home.html',
-                          user=user,
-                          next_race=next_race,
-                          user_prediction=user_prediction,
-                          total_score=total_score,
-                          has_pending_results=has_pending)
+    rank, field_size = get_rank_and_field(db, sid) if sid else (None, 0)
+
+    return {
+        'user': user,
+        'next_race': next_race,
+        'user_prediction': prediction,
+        'sc_vote': sc_vote,
+        'drivers': db.execute('SELECT * FROM drivers ORDER BY number').fetchall(),
+        'crowd': get_pick_distribution(db, next_race['id']) if next_race else {'total': 0, 'rows': []},
+        'sc_crowd': get_sc_crowd(db, next_race['id']) if next_race else {'votes': 0, 'yes_pct': 50, 'consensus': 0},
+        'sc_stats': get_safety_car_stats(db),
+        'sc_pool': get_sc_pool(db, sid),
+        'sc_pool_start': SC_POOL_START,
+        'sc_min_stake': SC_MIN_STAKE,
+        'total_score': total_score,
+        'rank': rank,
+        'field_size': field_size,
+        'form': get_recent_form(db, sid) if sid else [],
+        'standings': get_standings(db, league),
+        'leagues': leagues,
+        'selected_league': league,
+        'has_pending_results': has_races_pending_results(db),
+    }
+
+
+@app.route('/home')
+def home():
+    """The race desk. Everything worth seeing, whether or not you have voted."""
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+    db = get_db()
+    league_id = request.args.get('league', type=int)
+    return render_template('home.html', anonymous=False, **build_desk(db, user, league_id))
+
 
 @app.route('/predict/<int:race_id>', methods=['GET', 'POST'])
 def predict(race_id):
@@ -1510,8 +1795,26 @@ def predict(race_id):
                 INSERT INTO predictions (user_id, race_id, p1_driver_id, p2_driver_id, p3_driver_id)
                 VALUES (?, ?, ?, ?, ?)
             ''', (user['session_id'], race_id, p1, p2, p3))
+            # The safety-car call rides along with the podium on one submit.
+            # Priced here, not in the browser, and frozen against the crowd
+            # position at the moment the card is locked in.
+            try:
+                conviction = int(request.form.get('sc_conviction') or 0)
+            except (TypeError, ValueError):
+                conviction = 0
+            conviction = max(-100, min(100, conviction))
+            if abs(conviction) >= SC_MIN_STAKE:
+                consensus = get_sc_crowd(db, race_id)['consensus']
+                db.execute('''
+                    INSERT INTO sc_votes (user_id, race_id, conviction, multiplier)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(user_id, race_id) DO UPDATE SET
+                        conviction = excluded.conviction,
+                        multiplier = excluded.multiplier
+                ''', (user['session_id'], race_id, conviction,
+                      sc_multiplier(conviction, consensus)))
             db.commit()
-            flash('Prediction saved!', 'success')
+            flash('Card locked in.', 'success')
             return redirect(url_for('home'))
         except Exception as e:
             db.rollback()
@@ -1605,7 +1908,9 @@ def leaderboard():
                           races=races,
                           score_matrix=score_matrix,
                           current_user=user,
-                          season=filter_year)
+                          season=filter_year,
+                          sc_pools=get_sc_pools(db),
+                          sc_pool_start=SC_POOL_START)
 
 @app.route('/live')
 def live():

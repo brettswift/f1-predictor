@@ -1,45 +1,30 @@
 {% extends "base.html" %}
-
 {% block title %}{{ league['name'] }} - F1 Predictor{% endblock %}
-
 {% block content %}
-<div class="card">
+<section class="panel">
+  <div class="phead">
     <h2>{{ league['emoji_or_color'] }} {{ league['name'] }}</h2>
-    <p>
-        {% if league['whole_season'] %}
-        Scoring window: whole season
-        {% else %}
-        Scoring window: round {{ league['start_round'] }} forward
-        {% endif %}
-    </p>
-</div>
+    <span class="tag">{% if league['whole_season'] %}Whole season{% else %}Round {{ league['start_round'] }} forward{% endif %}</span>
+    <div class="rule"></div>
+    {% if is_member %}<a href="{{ url_for('league_invite', league_id=league['id']) }}" class="btn btn-sm"><span>Invite</span></a>{% endif %}
+  </div>
+</section>
 
-<div class="card">
-    <h3>Members</h3>
-    <div class="table-scroll">
+<section class="panel">
+  <div class="phead"><h2>Members</h2><span class="tag acc">{{ members|length }}</span><div class="rule"></div></div>
+  <div class="table-scroll">
     <table>
-        <thead>
-            <tr>
-                <th>User</th>
-                <th>Role</th>
-                <th>Joined</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for member in members %}
-            <tr>
-                <td>{{ member['user_id'] }}</td>
-                <td>{{ 'Admin' if member['is_admin'] else 'Member' }}</td>
-                <td>{{ member['joined_at'] }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
+      <thead><tr><th>Player</th><th style="width:100px">Role</th><th style="width:180px">Joined</th></tr></thead>
+      <tbody>
+        {% for member in members %}
+        <tr>
+          <td>{{ member['user_id'] }}</td>
+          <td><span class="tag {% if member['is_admin'] %}acc{% endif %}">{{ 'Admin' if member['is_admin'] else 'Member' }}</span></td>
+          <td><span class="num" style="font-size:11px;color:var(--dim)">{{ member['joined_at'] }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
     </table>
-    </div>
-    {% if is_member %}
-    <div style="margin-top: 16px;">
-        <a href="{{ url_for('league_invite', league_id=league['id']) }}" class="btn">Invite someone</a>
-    </div>
-    {% endif %}
-</div>
+  </div>
+</section>
 {% endblock %}
