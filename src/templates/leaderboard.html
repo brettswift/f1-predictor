@@ -1,82 +1,105 @@
 {% extends "base.html" %}
 
-{% block title %}Leaderboard - F1 Predictor{% endblock %}
+{% block title %}Standings - F1 Predictor{% endblock %}
+
+{% block extra_css %}
+<style>
+.seasons{display:flex;gap:2px;margin-left:auto}
+.seasons a{padding:5px 11px;font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--dimmer);border-radius:2px;text-decoration:none}
+.seasons a:hover{color:var(--tx);background:rgba(255,255,255,.04);text-decoration:none}
+.seasons a.on{color:var(--acc);background:rgba(176,140,255,.1);box-shadow:inset 0 0 0 1px rgba(176,140,255,.28)}
+.who{display:flex;align-items:center;gap:9px}
+.pfp{width:22px;height:22px;border-radius:50%;flex:0 0 auto;display:grid;place-items:center;font-size:12px;
+  background:rgba(255,255,255,.06);border:1px solid var(--line)}
+.form{display:flex;gap:3px;align-items:flex-end;height:18px}
+.form i{width:6px;border-radius:1px;display:block;min-height:2px;background:linear-gradient(180deg,var(--acc),rgba(176,140,255,.35))}
+.form i.zero{background:#252A38;height:2px}
+.matrix td,.matrix th{padding:7px 8px;text-align:center;font-family:var(--mono);font-size:11px}
+.matrix td:first-child,.matrix th:first-child{text-align:left;font-family:var(--sans);font-size:12.5px}
+.matrix .zero{color:#3E4354}
+</style>
+{% endblock %}
 
 {% block content %}
-<div class="card">
-    <h2>🏆 Leaderboard{% if season %} — Season {{ season }}{% endif %}</h2>
-    <p>Total scores{% if season %} after Season {{ season }} races{% else %} after all completed races{% endif %}</p>
-    {% if not season %}
-    <p><a href="?season=current">View current season</a> | <a href="?season=2025">2025</a> | <a href="?season=2024">2024</a></p>
-    {% else %}
-    <p><a href="/leaderboard">View all seasons</a></p>
-    {% endif %}
-</div>
-
-<div class="card">
-    <div class="table-scroll">
-    <table>
-        <thead>
-            <tr>
-                <th>Rank</th>
-                <th>Player</th>
-                <th style="text-align: right;">Score</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for user in users %}
-            <tr {% if user['session_id'] == current_user['session_id'] %}style="background: rgba(225, 6, 0, 0.1);"{% endif %}>
-                <td>
-                    {% if loop.index == 1 %}🥇
-                    {% elif loop.index == 2 %}🥈
-                    {% elif loop.index == 3 %}🥉
-                    {% else %}{{ loop.index }}{% endif %}
-                </td>
-                <td>
-                    {{ avatar_for(user) }} {{ display_name_for(user) }}
-                    {% if user['session_id'] == current_user['session_id'] %}
-                        <span style="font-size: 12px; opacity: 0.6;">(you)</span>
-                    {% endif %}
-                </td>
-                <td style="text-align: right;">
-                    <span class="score-badge">{{ user['total_score'] }}</span>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+<section class="panel">
+  <div class="phead">
+    <h2>Standings</h2>
+    {% if season %}<span class="tag acc">Season {{ season }}</span>{% endif %}
+    <div class="rule"></div>
+    <div class="seasons">
+      <a href="?season=current" class="{% if season %}on{% endif %}">Current</a>
+      <a href="?season=2025">2025</a>
+      <a href="?season=2024">2024</a>
+      <a href="/leaderboard">All</a>
     </div>
-</div>
+  </div>
+  <div class="table-scroll">
+  <table>
+    <thead><tr>
+      <th style="width:56px">Pos</th>
+      <th>Player</th>
+      <th style="width:110px">Form</th>
+      <th style="width:80px;text-align:right">Points</th>
+    </tr></thead>
+    <tbody>
+      {% for u in users %}
+      {% set recent = [] %}
+      {% for race in races[-5:] %}
+        {% set v = score_matrix[u['session_id']][race['id']] %}
+        {% if recent.append(v if v is number else 0) %}{% endif %}
+      {% endfor %}
+      {% set peak = recent|max if recent else 0 %}
+      <tr {% if u['session_id'] == current_user['session_id'] %}class="me"{% endif %}>
+        <td><span class="pos-n">{{ loop.index }}</span></td>
+        <td>
+          <span class="who">
+            <span class="pfp">{{ avatar_for(u) }}</span>
+            <span>{{ display_name_for(u) }}</span>
+            {% if u['session_id'] == current_user['session_id'] %}<span class="lbl" style="color:var(--acc)">you</span>{% endif %}
+          </span>
+        </td>
+        <td>
+          {% if recent %}
+          <span class="form">
+            {% for v in recent %}
+            <i class="{% if not v %}zero{% endif %}" style="height:{{ ((v / peak * 18)|round|int) if (peak and v) else 2 }}px" title="{{ v }} pts"></i>
+            {% endfor %}
+          </span>
+          {% else %}<span class="lbl">—</span>{% endif %}
+        </td>
+        <td style="text-align:right"><span class="pts">{{ u['total_score'] }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
 
 {% if races %}
-<div class="card">
-    <h3>Race-by-Race Breakdown</h3>
-    <div style="overflow-x: auto;">
-        <table style="min-width: 100%;">
-            <thead>
-                <tr>
-                    <th>Player</th>
-                    {% for race in races %}
-                    <th style="writing-mode: vertical-rl; text-orientation: mixed; white-space: nowrap;">{{ race['name'].split(' ')[0] }}</th>
-                    {% endfor %}
-                    <th>Total</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for user in users %}
-                <tr {% if user['session_id'] == current_user['session_id'] %}style="background: rgba(225, 6, 0, 0.1);"{% endif %}>
-                    <td>{{ avatar_for(user) }} {{ display_name_for(user) }}</td>
-                    {% for race in races %}
-                    <td style="text-align: center;">
-                        {{ score_matrix[user['session_id']][race['id']] }}
-                    </td>
-                    {% endfor %}
-                    <td><span class="score-badge">{{ user['total_score'] }}</span></td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
-</div>
+<section class="panel">
+  <div class="phead"><h2>Race by Race</h2><div class="rule"></div><span class="lbl">{{ races|length }} scored rounds</span></div>
+  <div class="table-scroll">
+    <table class="matrix">
+      <thead><tr>
+        <th>Player</th>
+        {% for race in races %}<th title="{{ race['name'] }}">R{{ race['round'] }}</th>{% endfor %}
+        <th>Total</th>
+      </tr></thead>
+      <tbody>
+        {% for u in users %}
+        <tr {% if u['session_id'] == current_user['session_id'] %}class="me"{% endif %}>
+          <td>{{ display_name_for(u) }}</td>
+          {% for race in races %}
+          {% set v = score_matrix[u['session_id']][race['id']] %}
+          <td class="{% if not (v is number and v) %}zero{% endif %}">{{ v }}</td>
+          {% endfor %}
+          <td><span class="pts">{{ u['total_score'] }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
 {% endif %}
 {% endblock %}

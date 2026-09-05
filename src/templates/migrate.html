@@ -1,30 +1,20 @@
 {% extends "base.html" %}
-
-{% block title %}Secure Your Account - F1 Predictor{% endblock %}
-
+{% block title %}Secure your account - F1 Predictor{% endblock %}
 {% block content %}
-<div class="card" style="text-align: center; margin-top: 30px;">
-    <h1 style="font-size: 48px; margin-bottom: 10px;">🔒</h1>
-    <h1>Keep your predictions safe</h1>
-    <p style="font-size: 18px; margin: 30px 0;">
-        Hi <strong>{{ user['username'] }}</strong>! Add your email so you can log back in
-        on any device and never lose your prediction history.
-    </p>
-    <p style="opacity: 0.8; margin-bottom: 25px;">
-        Your username, points, and all picks will stay exactly the same.
-    </p>
-
-    <form method="POST" action="{{ url_for('migrate_send') }}" style="max-width: 400px; margin: 0 auto;">
-        <input type="email" name="email" placeholder="you@example.com" required autofocus>
-        <button type="submit" class="btn" style="width: 100%;">Send Magic Link</button>
+<section class="panel centered">
+  <div class="phead"><h2>Secure Your Picks</h2><span class="tag warn">Recommended</span><div class="rule"></div></div>
+  <div class="pbody">
+    <p>Hi <strong style="color:var(--tx)">{{ user['username'] }}</strong> &mdash; add an email and you can log back in on any device without losing a single point.</p>
+    <p>Your name, your score and every card you've filled in stay exactly as they are.</p>
+    <form method="POST" action="{{ url_for('migrate_send') }}" style="margin-top:18px">
+      <div class="field">
+        <label for="email">Email</label>
+        <input type="email" id="email" name="email" placeholder="you@example.com" required autofocus>
+      </div>
+      <button type="submit" class="btn" style="width:100%"><span>Send magic link</span></button>
     </form>
-
-    <p style="margin-top: 25px; opacity: 0.6; font-size: 14px;">
-        We'll email you a one-time link. It expires in 15 minutes.
-    </p>
-
-    <p style="margin-top: 25px;">
-        <a href="{{ url_for('home') }}" class="btn btn-secondary">Skip for now</a>
-    </p>
-</div>
+    <p class="lbl" style="margin-top:16px">One-time link · expires in 15 minutes</p>
+    <div class="btnrow" style="margin-top:18px"><a href="{{ url_for('home') }}" class="btn btn-secondary"><span>Skip for now</span></a></div>
+  </div>
+</section>
 {% endblock %}

@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#08090C">
     <meta name="description" content="{% block meta_description %}Predict the F1 podium for each race. No signup required — just enter your name and compete!{% endblock %}">
     <meta property="og:title" content="{% block og_title %}F1 Predictor{% endblock %}">
     <meta property="og:description" content="{% block og_description %}Predict the F1 podium for each race. Compete with friends on the leaderboard!{% endblock %}">
@@ -11,375 +12,258 @@
     <meta property="og:type" content="website">
     <meta name="google-site-verification" content="{{ google_site_verification or 'GSC_VERIFICATION_CODE' }}" />
     <title>{% block title %}F1 Predictor{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-            color: #fff;
-            min-height: 100vh;
-        }
-        
-        .container {
-            max-width: 900px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        
-        header {
-            background: rgba(255, 255, 255, 0.05);
-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-            padding: 20px 0;
-            margin-bottom: 30px;
-        }
-        
-        header .container {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        
-        .logo {
-            font-size: 24px;
-            font-weight: bold;
-            color: #e10600;
-            text-decoration: none;
-        }
-        
-        .logo span {
-            color: #fff;
-        }
-        
-        nav a {
-            color: #fff;
-            text-decoration: none;
-            margin-left: 20px;
-            opacity: 0.8;
-            transition: opacity 0.2s;
-        }
-        
-        nav a:hover {
-            opacity: 1;
-        }
-        
-        .card {
-            background: rgba(255, 255, 255, 0.05);
-            border-radius: 12px;
-            padding: 30px;
-            margin-bottom: 20px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-        }
-        
-        h1 {
-            font-size: 32px;
-            margin-bottom: 10px;
-        }
-        
-        h2 {
-            font-size: 24px;
-            margin-bottom: 15px;
-            color: #e10600;
-        }
-        
-        h3 {
-            font-size: 18px;
-            margin-bottom: 10px;
-        }
-        
-        p {
-            line-height: 1.6;
-            opacity: 0.9;
-            margin-bottom: 15px;
-        }
-        
-        .btn {
-            display: inline-block;
-            background: #e10600;
-            color: #fff;
-            padding: 12px 24px;
-            border-radius: 6px;
-            text-decoration: none;
-            border: none;
-            cursor: pointer;
-            font-size: 16px;
-            font-weight: 500;
-            transition: background 0.2s;
-        }
-        
-        .btn:hover {
-            background: #c00500;
-        }
-        
-        .btn-secondary {
-            background: rgba(255, 255, 255, 0.1);
-        }
-        
-        .btn-secondary:hover {
-            background: rgba(255, 255, 255, 0.2);
-        }
-        
-        input[type="text"], select {
-            width: 100%;
-            padding: 12px;
-            border-radius: 6px;
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            background: rgba(255, 255, 255, 0.05);
-            color: #fff;
-            font-size: 16px;
-            margin-bottom: 15px;
-        }
-        
-        input[type="text"]::placeholder {
-            color: rgba(255, 255, 255, 0.5);
-        }
-        
-        select option {
-            background: #1a1a2e;
-            color: #fff;
-        }
-        
-        .alert {
-            padding: 12px 16px;
-            border-radius: 6px;
-            margin-bottom: 20px;
-        }
-        
-        .alert-error {
-            background: rgba(225, 6, 0, 0.2);
-            border: 1px solid #e10600;
-        }
-        
-        .alert-success {
-            background: rgba(0, 200, 83, 0.2);
-            border: 1px solid #00c853;
-        }
-        
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        
-        th, td {
-            padding: 12px;
-            text-align: left;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-        }
-        
-        th {
-            font-weight: 600;
-            opacity: 0.7;
-            font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        
-        .status {
-            display: inline-block;
-            padding: 4px 10px;
-            border-radius: 12px;
-            font-size: 12px;
-            font-weight: 500;
-        }
-        
-        .status-upcoming { background: rgba(255, 193, 7, 0.2); color: #ffc107; }
-        .status-open { background: rgba(0, 200, 83, 0.2); color: #00c853; }
-        .status-locked { background: rgba(255, 87, 34, 0.2); color: #ff5722; }
-        .status-completed { background: rgba(158, 158, 158, 0.2); color: #9e9e9e; }
-        
-        .podium {
-            display: flex;
-            gap: 15px;
-            margin: 20px 0;
-        }
-        
-        .podium-position {
-            flex: 1;
-            padding: 15px;
-            border-radius: 8px;
-            text-align: center;
-        }
-        
-        .podium-p1 { background: linear-gradient(135deg, #ffd700, #ffb300); color: #000; }
-        .podium-p2 { background: linear-gradient(135deg, #c0c0c0, #9e9e9e); color: #000; }
-        .podium-p3 { background: linear-gradient(135deg, #cd7f32, #a0522d); color: #fff; }
-        
-        .score-badge {
-            display: inline-block;
-            background: #e10600;
-            color: #fff;
-            padding: 4px 12px;
-            border-radius: 12px;
-            font-weight: bold;
-        }
-        
-        .user-info {
-            text-align: right;
-            font-size: 14px;
-        }
-        
-        .user-info strong {
-            color: #e10600;
-        }
+/* ═══ Undercut design system ═══════════════════════════
+   Visual language borrowed from F1 broadcast timing screens:
+   condensed grotesque display, tabular mono numerals, hairline
+   rules, 10px letterspaced caps labels, sector colours.        */
+:root{
+  --bg:#08090C; --bg2:#0B0D12; --panel:#0F1218; --panel2:#141823; --raise:#191E2A;
+  --line:rgba(255,255,255,.075); --line2:rgba(255,255,255,.14);
+  --tx:#E9EBF2; --dim:#8890A5; --dimmer:#565D71;
+  --acc:#B08CFF; --pos:#26E08A; --warn:#FFB43D; --neg:#FF3B5C;
+  --p1:#FFD34D; --p2:#C9D0DE; --p3:#D08A4E;
+  --mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --cond:'Barlow Condensed','Arial Narrow',system-ui,sans-serif;
+  --sans:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --rail:64px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{background:var(--bg);color:var(--tx);font-family:var(--sans);font-size:14px;line-height:1.5;
+  min-height:100vh;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:radial-gradient(900px 520px at 12% -8%,rgba(176,140,255,.10),transparent 60%),
+             radial-gradient(700px 480px at 96% 104%,rgba(255,180,61,.055),transparent 60%)}
+body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:9999;opacity:.05;mix-blend-mode:soft-light;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3'/></filter><rect width='140' height='140' filter='url(%23n)'/></svg>")}
+::selection{background:rgba(176,140,255,.3)}
+a{color:var(--acc);text-decoration:none}
+a:hover{text-decoration:underline}
+:focus-visible{outline:1px solid var(--acc);outline-offset:2px}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
+.lbl{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--dimmer)}
+.muted{color:var(--dim)}
+.rule{flex:1;height:1px;background:linear-gradient(90deg,var(--line),transparent)}
 
-        .app-footer {
-            padding: 12px 0;
-            margin-top: 40px;
-            text-align: center;
-            border-top: 1px solid rgba(255, 255, 255, 0.06);
-        }
+/* ── shell ── */
+.shell{position:relative;z-index:1;display:grid;grid-template-columns:var(--rail) minmax(0,1fr);min-height:100vh}
+.shell.norail{grid-template-columns:minmax(0,1fr)}
+.rail{border-right:1px solid var(--line);display:flex;flex-direction:column;align-items:center;
+  padding:14px 0 18px;position:sticky;top:0;height:100vh;
+  background:linear-gradient(180deg,rgba(255,255,255,.02),transparent 30%)}
+.mark{writing-mode:vertical-rl;transform:rotate(180deg);font-family:var(--cond);font-weight:700;
+  font-size:19px;letter-spacing:.42em;text-transform:uppercase;color:var(--tx)}
+.mark b{color:var(--acc)}
+.mark:hover{text-decoration:none;color:var(--tx)}
+.railnav{margin-top:auto;display:flex;flex-direction:column;gap:2px;width:100%;align-items:center}
+.rnav{width:38px;height:34px;display:grid;place-items:center;border-radius:7px;color:var(--dimmer);position:relative}
+.rnav:hover{color:var(--tx);background:rgba(255,255,255,.045);text-decoration:none}
+.rnav svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.rnav.on{color:var(--acc);background:rgba(176,140,255,.10)}
+.rnav.on::before{content:'';position:absolute;left:-13px;top:9px;bottom:9px;width:2px;background:var(--acc);border-radius:2px}
+.avatar{margin-top:12px;width:30px;height:30px;border-radius:50%;display:grid;place-items:center;font-size:15px;
+  background:rgba(255,255,255,.06);border:1px solid var(--line2)}
+.avatar:hover{text-decoration:none}
+.envflag{font-family:var(--mono);font-size:8px;letter-spacing:.12em;color:var(--warn);
+  border:1px solid rgba(255,180,61,.4);border-radius:2px;padding:2px 4px;margin-bottom:10px}
 
-        .app-footer .version {
-            font-size: 11px;
-            color: rgba(255, 255, 255, 0.35);
-        }
+.main{min-width:0;padding:0 0 64px}
+.container{max-width:1140px;margin:0 auto;padding:22px 26px 0}
+.stack{display:grid;gap:18px}
 
-        /* Mobile responsiveness */
-        @media (max-width: 600px) {
-            .container {
-                padding: 10px;
-            }
+/* ── panels ── */
+.panel,.card{position:relative;background:linear-gradient(180deg,var(--panel),#0C0F15);
+  border:1px solid var(--line);border-radius:2px}
+.panel::before,.card::before,.panel::after,.card::after{content:'';position:absolute;width:9px;height:9px;pointer-events:none}
+.panel::before,.card::before{top:-1px;left:-1px;border-top:1px solid var(--line2);border-left:1px solid var(--line2)}
+.panel::after,.card::after{bottom:-1px;right:-1px;border-bottom:1px solid var(--line2);border-right:1px solid var(--line2)}
+.card{padding:18px 18px}
+.phead{display:flex;align-items:center;gap:12px;padding:13px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.phead h2,.phead h3{margin:0;font-family:var(--cond);font-weight:600;font-size:15px;letter-spacing:.2em;text-transform:uppercase;color:var(--tx)}
+.pbody{padding:16px}
 
-            header .container {
-                flex-direction: column;
-                gap: 10px;
-                text-align: center;
-            }
+h1{font-family:var(--cond);font-weight:600;font-size:38px;line-height:1;letter-spacing:-.005em;text-transform:uppercase}
+h2{font-family:var(--cond);font-weight:600;font-size:22px;letter-spacing:.02em;color:var(--tx)}
+h3{font-family:var(--cond);font-weight:600;font-size:16px;letter-spacing:.12em;text-transform:uppercase;color:var(--tx)}
+p{line-height:1.6;color:var(--dim)}
+p+p{margin-top:10px}
 
-            nav a {
-                margin: 0 8px;
-                font-size: 14px;
-            }
+.tag{font-family:var(--mono);font-size:9px;letter-spacing:.12em;padding:3px 6px;border-radius:2px;
+  border:1px solid var(--line2);color:var(--dim);text-transform:uppercase;white-space:nowrap}
+.tag.acc{color:var(--acc);border-color:rgba(176,140,255,.35);background:rgba(176,140,255,.07)}
+.tag.pos{color:var(--pos);border-color:rgba(38,224,138,.3);background:rgba(38,224,138,.06)}
+.tag.warn{color:var(--warn);border-color:rgba(255,180,61,.3);background:rgba(255,180,61,.06)}
+.tag.neg{color:var(--neg);border-color:rgba(255,59,92,.3);background:rgba(255,59,92,.06)}
+.status{font-family:var(--mono);font-size:9px;letter-spacing:.12em;padding:3px 7px;border-radius:2px;
+  text-transform:uppercase;border:1px solid var(--line2);color:var(--dim);white-space:nowrap}
+.status-upcoming{color:var(--dim);border-color:var(--line2)}
+.status-open{color:var(--pos);border-color:rgba(38,224,138,.32);background:rgba(38,224,138,.06)}
+.status-locked{color:var(--warn);border-color:rgba(255,180,61,.32);background:rgba(255,180,61,.06)}
+.status-completed{color:var(--dimmer);border-color:var(--line)}
 
-            h1 {
-                font-size: 24px;
-            }
+/* ── buttons ── */
+.btn{position:relative;display:inline-block;transform:skewX(-7deg);padding:10px 20px;background:var(--acc);
+  color:#0A0B10;font-family:var(--cond);font-weight:700;font-size:14px;letter-spacing:.16em;
+  text-transform:uppercase;border:0;border-radius:2px;cursor:pointer;transition:.16s;text-align:center}
+.btn>span,.btn-i{display:block;transform:skewX(7deg)}
+.btn:hover{box-shadow:0 8px 26px -10px rgba(176,140,255,.9);transform:skewX(-7deg) translateY(-1px);text-decoration:none;color:#0A0B10}
+.btn:disabled,.btn.is-off{background:#252A38;color:#5A6072;cursor:not-allowed;box-shadow:none;transform:skewX(-7deg)}
+.btn-secondary{background:transparent;color:var(--tx);box-shadow:inset 0 0 0 1px var(--line2)}
+.btn-secondary:hover{background:rgba(255,255,255,.05);color:var(--tx);box-shadow:inset 0 0 0 1px var(--line2)}
+.btn-warn{background:var(--warn)}
+.btn-warn:hover{box-shadow:0 8px 26px -10px rgba(255,180,61,.9);color:#0A0B10}
+.btn-sm{padding:6px 12px;font-size:12px;letter-spacing:.12em}
+.btnrow{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 
-            h2 {
-                font-size: 20px;
-            }
+/* ── forms ── */
+label{display:block;font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--dimmer);margin-bottom:7px}
+input[type="text"],input[type="email"],input[type="password"],select,textarea{
+  width:100%;padding:11px 12px;border-radius:2px;border:1px solid var(--line2);background:var(--panel2);
+  color:var(--tx);font-family:var(--sans);font-size:14px;transition:.14s}
+input:focus,select:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 1px rgba(176,140,255,.4)}
+input::placeholder{color:var(--dimmer)}
+select{font-family:var(--mono);font-size:13px;appearance:none;
+  background-image:linear-gradient(45deg,transparent 50%,var(--dim) 50%),linear-gradient(135deg,var(--dim) 50%,transparent 50%);
+  background-position:calc(100% - 17px) 50%,calc(100% - 12px) 50%;background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+select option{background:#12151D;color:var(--tx)}
+.field{margin-bottom:18px}
+.field .hint{font-size:11.5px;color:var(--dim);margin-top:7px;line-height:1.5}
 
-            .card {
-                padding: 20px 15px;
-            }
+/* ── alerts ── */
+.alert{padding:11px 14px;border-radius:2px;margin-bottom:16px;font-size:13px;border:1px solid var(--line2);
+  background:var(--panel2)}
+.alert-error{border-color:rgba(255,59,92,.45);background:rgba(255,59,92,.08);color:#FFC3CD}
+.alert-success{border-color:rgba(38,224,138,.4);background:rgba(38,224,138,.07);color:#B6F5D6}
 
-            .podium {
-                flex-direction: column;
-                gap: 10px;
-            }
+/* ── tables ── */
+table{width:100%;border-collapse:collapse}
+th{padding:9px 14px;text-align:left;border-bottom:1px solid var(--line);font-family:var(--mono);
+  font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--dimmer);font-weight:400;white-space:nowrap}
+td{padding:10px 14px;border-bottom:1px solid rgba(255,255,255,.04);font-size:13px;vertical-align:middle}
+tbody tr:last-child td{border-bottom:0}
+tbody tr{transition:.12s}
+tbody tr:hover{background:rgba(255,255,255,.022)}
+tr.me{background:linear-gradient(90deg,rgba(176,140,255,.13),rgba(176,140,255,.02) 60%)}
+tr.me td:first-child{box-shadow:inset 2px 0 0 var(--acc)}
+.pos-n{font-family:var(--cond);font-weight:600;font-size:17px;min-width:20px;display:inline-block}
+.pts{font-family:var(--mono);font-size:13px;font-weight:600}
+.table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
 
-            table {
-                font-size: 14px;
-            }
+/* ── podium blocks (shared by desk, predict, race pages) ── */
+.podium{display:grid;grid-template-columns:1fr 1.16fr 1fr;gap:12px;align-items:end;margin:18px 0}
+.pslot{position:relative;transform:skewX(-7deg);border:1px solid var(--line2);border-radius:2px;
+  background:linear-gradient(180deg,var(--panel2),#0D1017);height:118px}
+.pslot .in{transform:skewX(7deg);height:100%;padding:11px 13px;display:flex;flex-direction:column;justify-content:space-between}
+.pslot[data-pos="1"]{height:140px}
+.pslot[data-pos="3"]{height:104px}
+.pslot .bar{position:absolute;left:-1px;top:-1px;bottom:-1px;width:3px;border-radius:2px 0 0 2px}
+.pslot[data-pos="1"] .bar{background:var(--p1)}
+.pslot[data-pos="2"] .bar{background:var(--p2)}
+.pslot[data-pos="3"] .bar{background:var(--p3)}
+.pslot .ghost{position:absolute;right:8px;bottom:0;transform:skewX(7deg);font-family:var(--cond);font-weight:700;
+  font-size:62px;line-height:.82;color:transparent;-webkit-text-stroke:1px rgba(255,255,255,.12);pointer-events:none}
+.pslot .who{font-family:var(--cond);font-weight:700;font-size:24px;line-height:1.05;letter-spacing:.02em}
+.pslot .sub{font-family:var(--mono);font-size:9.5px;color:var(--dimmer);letter-spacing:.06em}
+.pslot.empty{border-style:dashed;border-color:rgba(255,255,255,.11);background:rgba(255,255,255,.012)}
 
-            th, td {
-                padding: 8px 4px;
-            }
+/* ── misc ── */
+.meter{height:3px;background:#1C2130;border-radius:3px;overflow:hidden;min-width:60px}
+.meter i{display:block;height:100%;border-radius:3px;background:linear-gradient(90deg,rgba(176,140,255,.45),var(--acc))}
+.meter.warn i{background:linear-gradient(90deg,rgba(255,180,61,.4),var(--warn))}
+.kv{display:flex;align-items:baseline;gap:8px}
+.big{font-family:var(--cond);font-weight:700;font-size:30px;line-height:1.05}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.centered{max-width:560px;margin:8px auto 0}
+.app-footer{padding:16px 0;margin-top:44px;text-align:center;border-top:1px solid var(--line)}
+.app-footer .version{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;color:#3E4354}
+.devbar{background:var(--warn);color:#0A0B10;text-align:center;padding:5px 0;font-family:var(--mono);
+  font-size:9.5px;letter-spacing:.24em;text-transform:uppercase;font-weight:600;position:relative;z-index:2}
 
-            .btn {
-                padding: 10px 16px;
-                font-size: 14px;
-            }
-
-            .user-info {
-                text-align: center;
-            }
-
-            .card > div {
-                flex-direction: column !important;
-                text-align: center !important;
-            }
-
-            .card > div > div:last-child {
-                text-align: center !important;
-                margin-top: 10px;
-            }
-        }
-
-        /* Scrollable tables on mobile */
-        .table-scroll {
-            overflow-x: auto;
-            -webkit-overflow-scrolling: touch;
-        }
-
-        @media (max-width: 600px) {
-            .table-scroll table {
-                min-width: 500px;
-            }
-        }
+@media (max-width:860px){
+  .shell{grid-template-columns:1fr}
+  .rail{position:static;height:auto;width:100%;flex-direction:row;gap:12px;padding:8px 14px;
+    border-right:0;border-bottom:1px solid var(--line)}
+  .mark{writing-mode:horizontal-tb;transform:none;font-size:16px}
+  .railnav{margin:0 0 0 auto;flex-direction:row;width:auto;gap:0}
+  .rnav.on::before{left:9px;right:9px;top:auto;bottom:-8px;width:auto;height:2px}
+  .avatar{margin:0 0 0 4px}
+  .envflag{margin:0}
+  .container{padding:16px 14px 0}
+  h1{font-size:28px}
+  .grid2,.grid3{grid-template-columns:1fr}
+  .podium{gap:7px}
+  .pslot .who{font-size:18px}
+  .table-scroll table{min-width:520px}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
     </style>
     {% block extra_css %}{% endblock %}
 </head>
 <body>
-    {% if environment == 'dev' %}
-    <div style="background: #ff69b4; color: #000; text-align: center; padding: 8px 0; font-weight: bold; font-size: 14px;">
-        DEVELOPMENT
-    </div>
-    {% endif %}
-    {% if request.endpoint not in ['index'] %}
-    <header>
-        <div class="container">
-            <a href="{{ url_for('home') }}" class="logo">F1 <span>Predictor</span></a>
+{% set chrome = request.endpoint not in ['index', 'login', 'login_sent', 'join_login'] %}
+{% if environment == 'dev' %}<div class="devbar">Development environment</div>{% endif %}
+
+<div class="shell{% if not chrome %} norail{% endif %}">
+    {% if chrome %}
+    <aside class="rail">
+        <a href="{{ url_for('home') }}" class="mark">UNDER<b>·</b>CUT</a>
+        {% if environment == 'dev' %}<span class="envflag">DEV</span>{% endif %}
+        <nav class="railnav">
+            <a class="rnav {% if request.endpoint == 'home' %}on{% endif %}" href="{{ url_for('home') }}" title="Race desk" aria-label="Race desk">
+                <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h13"/></svg></a>
+            <a class="rnav {% if request.endpoint in ['races','race_detail','predict','live_leaderboard'] %}on{% endif %}" href="{{ url_for('races') }}" title="Races" aria-label="Races">
+                <svg viewBox="0 0 24 24"><path d="M5 4v16M5 5h13l-2.5 4L18 13H5"/></svg></a>
+            <a class="rnav {% if request.endpoint == 'leaderboard' %}on{% endif %}" href="{{ url_for('leaderboard') }}" title="Standings" aria-label="Standings">
+                <svg viewBox="0 0 24 24"><path d="M6 20V10M12 20V4M18 20v-7"/></svg></a>
+            <a class="rnav {% if request.endpoint in ['leagues','league_detail','new_league','league_invite'] %}on{% endif %}" href="{{ url_for('leagues') }}" title="Leagues" aria-label="Leagues">
+                <svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0 1 12 0M17 11a3 3 0 1 0-2-5.2M21 20a5 5 0 0 0-3-4.6"/></svg></a>
             {% if environment == 'dev' %}
-            <span style="background: #ffc107; color: #000; padding: 4px 12px; border-radius: 4px; font-size: 12px; font-weight: bold; margin-left: 10px;">DEV</span>
+            <a class="rnav" href="/admin" target="_blank" title="Admin" aria-label="Admin">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg></a>
             {% endif %}
-            <nav>
-                <a href="{{ url_for('home') }}">Home</a>
-                <a href="{{ url_for('races') }}">Races</a>
-                <a href="{{ url_for('leaderboard') }}">Leaderboard</a>
-                <a href="{{ url_for('leagues') }}">Leagues</a>
-                {% if environment == 'dev' %}
-                <a href="/admin" target="_blank">Admin</a>
-                {% endif %}
-                <a href="{{ url_for('profile') }}">Profile</a>
-                <a href="{{ url_for('logout') }}">Logout</a>
-            </nav>
-        </div>
-    </header>
+            <a class="avatar" href="{{ url_for('profile') }}" title="Profile">{% if current_user %}{{ avatar_for(current_user) }}{% else %}◆{% endif %}</a>
+            <a class="rnav" href="{{ url_for('logout') }}" title="Log out" aria-label="Log out">
+                <svg viewBox="0 0 24 24"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 16l-4-4 4-4M6 12h11"/></svg></a>
+        </nav>
+    </aside>
     {% endif %}
-    
-    <main class="container">
-        {% if current_user and current_user['legacy_user'] and not current_user['email'] %}
-        <div class="card" style="border-color: #e10600;">
-            <div style="display: flex; flex-wrap: wrap; gap: 20px; align-items: center; justify-content: space-between;">
-                <div>
-                    <h2 style="margin-bottom: 8px;">🔒 Secure your predictions</h2>
-                    <p style="margin-bottom: 0; opacity: 0.9;">
-                        Add your email to keep your points and history safe across devices.
-                    </p>
+
+    <main class="main">
+        <div class="container stack">
+            {% if current_user and current_user['legacy_user'] and not current_user['email'] %}
+            <section class="panel">
+                <div class="phead"><h3>Secure your picks</h3><span class="tag warn">No email on file</span><div class="rule"></div></div>
+                <div class="pbody" style="display:flex;gap:20px;align-items:flex-end;flex-wrap:wrap">
+                    <p style="flex:1;min-width:240px;margin:0">Add an email and your points, streak and pick history follow you to any device. Nothing else changes &mdash; no password, just a one-time link.</p>
+                    <form method="POST" action="{{ url_for('migrate_send') }}" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+                        <input type="email" name="email" placeholder="you@example.com" required style="min-width:220px;width:auto">
+                        <button type="submit" class="btn"><span>Send link</span></button>
+                        <a href="{{ url_for('migrate') }}" class="lbl">Learn more</a>
+                    </form>
                 </div>
-                <form method="POST" action="{{ url_for('migrate_send') }}" style="display: flex; gap: 10px; flex-wrap: wrap;">
-                    <input type="email" name="email" placeholder="you@example.com" required style="min-width: 220px; margin-bottom: 0;">
-                    <button type="submit" class="btn">Send link</button>
-                    <a href="{{ url_for('migrate') }}" class="btn btn-secondary">Learn more</a>
-                </form>
-            </div>
-        </div>
-        {% endif %}
-
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-                {% for category, message in messages %}
-                    <div class="alert alert-{{ category }}">{{ message }}</div>
-                {% endfor %}
+            </section>
             {% endif %}
-        {% endwith %}
 
-        {% block content %}{% endblock %}
-    </main>
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}{% for category, message in messages %}
+                    <div class="alert alert-{{ category }}">{{ message }}</div>
+                {% endfor %}{% endif %}
+            {% endwith %}
 
-    {% if app_version %}
-    <footer class="app-footer">
-        <div class="container">
-            <span class="version">v{{ app_version }}</span>
+            {% block content %}{% endblock %}
         </div>
-    </footer>
-    {% endif %}
 
-    {% block extra_js %}{% endblock %}
+        {% if app_version %}
+        <footer class="app-footer"><span class="version">UNDERCUT · v{{ app_version }}</span></footer>
+        {% endif %}
+    </main>
+</div>
+{% block extra_js %}{% endblock %}
 </body>
 </html>

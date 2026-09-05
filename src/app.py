@@ -1414,6 +1414,97 @@ def set_username():
     session.permanent = True
     return redirect(url_for('home'))
 
+
+# ─── Race-desk data (Undercut UI) ──────────────────────────────────────────
+# Read-only aggregates that make the desk useful even when you have not voted.
+
+def get_pick_distribution(db, race_id, limit=8):
+    """Crowd mood: share of entrants backing each driver for the podium.
+
+    Real sentiment from the game itself rather than an external feed - the
+    numbers are the field's own picks for this race.
+    """
+    try:
+        total = db.execute(
+            'SELECT COUNT(*) AS c FROM predictions WHERE race_id = ?', (race_id,)
+        ).fetchone()['c']
+        if not total:
+            return {'total': 0, 'rows': []}
+        rows = db.execute('''
+            SELECT d.id AS id, d.name AS name, d.code AS code,
+                   SUM(CASE WHEN p.p1_driver_id = d.id THEN 1 ELSE 0 END) AS win_picks,
+                   COUNT(*) AS podium_picks
+            FROM predictions p
+            JOIN drivers d
+              ON d.id = p.p1_driver_id OR d.id = p.p2_driver_id OR d.id = p.p3_driver_id
+            WHERE p.race_id = ?
+            GROUP BY d.id
+            ORDER BY podium_picks DESC, win_picks DESC
+            LIMIT ?
+        ''', (race_id, limit)).fetchall()
+    except Exception:
+        return {'total': 0, 'rows': []}
+    return {
+        'total': total,
+        'rows': [{
+            'name': r['name'],
+            'code': r['code'] or (r['name'] or '').split()[-1][:3].upper(),
+            'win_pct': round(r['win_picks'] * 100.0 / total),
+            'podium_pct': round(r['podium_picks'] * 100.0 / total),
+        } for r in rows],
+    }
+
+
+def get_safety_car_stats(db):
+    """How often the season's completed races have needed an SC or VSC."""
+    try:
+        row = db.execute('''
+            SELECT COUNT(*) AS n,
+                   SUM(CASE WHEN had_safety_car = 1 OR had_virtual_safety_car = 1
+                            THEN 1 ELSE 0 END) AS sc
+            FROM results
+        ''').fetchone()
+    except Exception:
+        return None
+    n = row['n'] or 0
+    if not n:
+        return None
+    sc = row['sc'] or 0
+    return {'races': n, 'with_sc': sc, 'pct': round(sc * 100.0 / n)}
+
+
+def get_rank_and_field(db, session_id):
+    """1-indexed rank among non-synthetic players, plus the size of the field."""
+    try:
+        rows = db.execute('''
+            SELECT u.session_id AS sid, COALESCE(SUM(s.points), 0) AS total
+            FROM users u
+            LEFT JOIN scores s ON u.session_id = s.user_id
+            WHERE u.is_synthetic = 0
+            GROUP BY u.session_id
+            ORDER BY total DESC
+        ''').fetchall()
+    except Exception:
+        return None, 0
+    rank = next((i for i, r in enumerate(rows, 1) if r['sid'] == session_id), None)
+    return rank, len(rows)
+
+
+def get_recent_form(db, session_id, limit=5):
+    """Points from the player's most recent scored races, oldest first."""
+    try:
+        rows = db.execute('''
+            SELECT s.points AS points
+            FROM scores s JOIN races r ON r.id = s.race_id
+            WHERE s.user_id = ?
+            ORDER BY r.round DESC
+            LIMIT ?
+        ''', (session_id, limit)).fetchall()
+    except Exception:
+        return []
+    return [r['points'] or 0 for r in reversed(rows)]
+
+
 @app.route('/home')
 def home():
     """Home page showing upcoming race and user's predictions."""
@@ -1450,12 +1541,22 @@ def home():
 
     has_pending = has_races_pending_results(db)
 
+    crowd = get_pick_distribution(db, next_race['id']) if next_race else {'total': 0, 'rows': []}
+    sc_stats = get_safety_car_stats(db)
+    rank, field_size = get_rank_and_field(db, user['session_id'])
+    form = get_recent_form(db, user['session_id'])
+
     return render_template('home.html',
                           user=user,
                           next_race=next_race,
                           user_prediction=user_prediction,
                           total_score=total_score,
-                          has_pending_results=has_pending)
+                          has_pending_results=has_pending,
+                          crowd=crowd,
+                          sc_stats=sc_stats,
+                          rank=rank,
+                          field_size=field_size,
+                          form=form)
 
 @app.route('/predict/<int:race_id>', methods=['GET', 'POST'])
 def predict(race_id):

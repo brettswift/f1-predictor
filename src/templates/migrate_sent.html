@@ -1,20 +1,12 @@
 {% extends "base.html" %}
-
-{% block title %}Check Your Email - F1 Predictor{% endblock %}
-
+{% block title %}Check your email - F1 Predictor{% endblock %}
 {% block content %}
-<div class="card" style="text-align: center; margin-top: 50px;">
-    <h1 style="font-size: 48px; margin-bottom: 10px;">📬</h1>
-    <h1>Magic link sent</h1>
-    <p style="font-size: 18px; margin: 30px 0;">
-        A one-time login link has been sent to <strong>{{ email }}</strong>.
-    </p>
-    <p style="opacity: 0.8; margin-bottom: 15px;">
-        Click the link to verify your email and keep your predictions tied to this account.
-    </p>
-    <p style="opacity: 0.6; font-size: 14px;">
-        The link expires in 15 minutes and can only be used once.
-    </p>
-    <a href="{{ url_for('home') }}" class="btn btn-secondary" style="margin-top: 20px;">Back to home</a>
-</div>
+<section class="panel centered">
+  <div class="phead"><h2>Link Sent</h2><span class="tag pos">Check your inbox</span><div class="rule"></div></div>
+  <div class="pbody">
+    <p>A one-time link is on its way to <strong style="color:var(--tx)">{{ email }}</strong>. Click it to tie your picks to that address.</p>
+    <p class="lbl" style="margin-top:14px">Expires in 15 minutes · single use</p>
+    <div class="btnrow" style="margin-top:20px"><a href="{{ url_for('home') }}" class="btn btn-secondary"><span>Back to desk</span></a></div>
+  </div>
+</section>
 {% endblock %}
