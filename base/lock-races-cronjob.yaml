@@ -1,0 +1,43 @@
+# Auto-lock races once their start time passes (BUD-126 / Bug 3).
+# Runs every minute; exits in <1 s when no races need locking.
+# Ensures open races transition to locked within ~1 minute of start
+# without any manual action, so results fetching and prediction
+# cutoffs work on time.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: f1-lock-races
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 300
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: lock-races
+            image: ghcr.io/brettswift/f1-predictor:latest
+            command:
+            - python3
+            - /app/cron/lock_races.py
+            env:
+            - name: DATABASE_PATH
+              value: "/data/f1_predictions.db"
+            resources:
+              requests:
+                cpu: 10m
+                memory: 32Mi
+              limits:
+                cpu: 100m
+                memory: 128Mi
+            volumeMounts:
+            - name: data
+              mountPath: /data
+          volumes:
+          - name: data
+            persistentVolumeClaim:
+              claimName: f1-predictor-data

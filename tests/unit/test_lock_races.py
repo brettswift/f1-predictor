@@ -3,6 +3,7 @@
 import pytest
 import os
 import sys
+import yaml
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
 
