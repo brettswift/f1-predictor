@@ -645,10 +645,24 @@ def fetch_race_results_from_api(db, race):
     try:
         podium = openf1.get_podium(session_key, db=db)
     except openf1.OpenF1Error as e:
+        fetch_attempts.record_fetch_attempt(
+            db, 'session_result', f'session_result?session_key={session_key}',
+            fetch_attempts.outcome_for_error(e),
+            http_status=getattr(e, 'status_code', None),
+            session_key=session_key, race_id=race['id'], detail=str(e),
+        )
         app.logger.warning(f"Results fetch failed for race {race['id']}: {e}")
         return None
     if not podium:
+        fetch_attempts.record_fetch_attempt(
+            db, 'session_result', f'session_result?session_key={session_key}',
+            fetch_attempts.Outcome.EMPTY, session_key=session_key, race_id=race['id'],
+        )
         return None
+    fetch_attempts.record_fetch_attempt(
+        db, 'session_result', f'session_result?session_key={session_key}',
+        fetch_attempts.Outcome.OK, session_key=session_key, race_id=race['id'],
+    )
 
     resolved = {}
     for slot in ('p1', 'p2', 'p3'):
