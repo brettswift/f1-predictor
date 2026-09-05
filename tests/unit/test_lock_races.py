@@ -3,7 +3,6 @@
 import pytest
 import os
 import sys
-import yaml
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
 
@@ -185,71 +184,13 @@ class TestLockRacesLogic:
 
         assert any('No races to lock' in record.message for record in caplog.records)
 
-
-class TestLockRacesCronJobManifest:
-    """Test cases for the lock-races CronJob Kubernetes manifest."""
-
-    @pytest.fixture
-    def cronjob_spec(self):
-        """Load the lock-races CronJob YAML."""
-        yaml_path = os.path.join(
-            os.path.dirname(__file__), '..', '..', 'base', 'lock-races-cronjob.yaml'
-        )
-        with open(yaml_path) as f:
-            return yaml.safe_load(f)
-
-    def test_cj_015_cronjob_exists_and_valid(self, cronjob_spec):
-        """CJ-015: Lock-races CronJob is a valid CronJob resource."""
-        assert cronjob_spec['kind'] == 'CronJob'
-        assert cronjob_spec['apiVersion'] == 'batch/v1'
-
-    def test_cj_015_runs_every_minute(self, cronjob_spec):
-        """CJ-015: CronJob runs every minute (* * * * *)."""
-        assert cronjob_spec['spec']['schedule'] == "* * * * *"
-
-    def test_cj_015_runs_lock_races_script(self, cronjob_spec):
-        """CJ-015: CronJob runs lock_races.py."""
-        containers = cronjob_spec['spec']['jobTemplate']['spec']['template']['spec']['containers']
-        command_str = ' '.join(containers[0]['command'])
-        assert 'lock_races.py' in command_str
-
-    def test_cj_015_restart_policy_on_failure(self, cronjob_spec):
-        """CJ-015: CronJob has restartPolicy: OnFailure."""
-        restart = cronjob_spec['spec']['jobTemplate']['spec']['template']['spec']['restartPolicy']
-        assert restart == 'OnFailure'
-
-    def test_cj_015_resource_limits_set(self, cronjob_spec):
-        """CJ-015: CronJob has resource limits."""
-        resources = cronjob_spec['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['resources']
-        assert 'requests' in resources
-        assert 'limits' in resources
-
-    def test_cj_015_pvc_mounted_at_data(self, cronjob_spec):
-        """CJ-015: PVC mounted at /data."""
-        mounts = cronjob_spec['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['volumeMounts']
-        data_mount = next((m for m in mounts if m['mountPath'] == '/data'), None)
-        assert data_mount is not None
-
-    def test_cj_015_concurrency_policy_forbid(self, cronjob_spec):
-        """CJ-015: ConcurrencyPolicy is Forbid."""
-        assert cronjob_spec['spec'].get('concurrencyPolicy') == 'Forbid'
-
-    def test_cj_015_failed_jobs_history_limit(self, cronjob_spec):
-        """CJ-015: Failed jobs history is retained."""
-        assert cronjob_spec['spec'].get('failedJobsHistoryLimit') == 2
-
-    def test_cj_015_in_base_kustomization(self):
-        """CJ-015: lock-races CronJob is wired into base kustomization.
-
-        The standalone CronJob only provides reliability if it is actually
-        deployed. This guards against the manifest being present on disk but
-        forgotten in the base kustomization resources list.
-        """
-        kust_path = os.path.join(
-            os.path.dirname(__file__), '..', '..', 'base', 'kustomization.yaml'
-        )
-        with open(kust_path) as f:
-            kust = yaml.safe_load(f)
-        assert 'lock-races-cronjob.yaml' in kust.get('resources', []), \
-            "base/kustomization.yaml must include lock-races-cronjob.yaml"
+# Note: there is deliberately no standalone lock-races CronJob manifest.
+# Locking is covered by two live paths - cron/race_manager.py's
+# promote_to_locked() (base/race-manager-cronjob.yaml, every 5 min on race
+# weekend days) and app.py's auto_lock_races() in-process fallback. A
+# standalone f1-lock-races CronJob running this script was added once
+# (2026-08-27) and removed the same day in BUD-127 as dead/unwired config;
+# test_cronjob_deployment.py::test_orphaned_cronjob_manifests_removed
+# guards against it coming back. This file's lock_races() stays covered by
+# the tests above as a tested pure function, not because anything deploys it.
 
