@@ -240,12 +240,17 @@ def get_drivers(session_key: int = None, season: int = None, db=None) -> CachedR
     """
     if session_key is not None:
         return _get("drivers", {"session_key": session_key}, db=db)
-    sessions = get_race_sessions(season=season, db=db).data
+    try:
+        sessions = get_race_sessions(season=season, db=db).data
+    except OpenF1Error:
+        sessions = []
     if not sessions:
         raise OpenF1Error("No sessions available to resolve a driver list")
     latest_started = [s for s in sessions if _has_started(s)]
     chosen = (latest_started or sessions)[-1 if latest_started else 0]
     return _get("drivers", {"session_key": chosen["session_key"]}, db=db)
+
+
 
 
 def get_session_result(session_key: int, db=None) -> CachedResult:

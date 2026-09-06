@@ -1,8 +1,23 @@
 #!/usr/bin/env python3
 """
-F1 Mock API - Ergast-compatible mock for testing and simulation.
-Seeds from real Ergast API on startup if empty.
-Admin UI for controlling race state: start times, finish, podium.
+F1 Mock API - OpenF1-shaped mock for testing and simulation.
+
+Exposes the upstream OpenF1 endpoints the predictor consumes:
+  GET /health
+  GET /v1/meetings
+  GET /v1/sessions
+  GET /v1/drivers
+  GET /v1/starting_grid
+  GET /v1/session_result
+  GET /v1/race_control
+
+Also keeps the legacy Ergast-compatible routes for backwards compatibility:
+  GET /<season>.json
+  GET /<season>/drivers.json
+  GET /<season>/<round>/results.json
+
+Seeds from Ergast API on startup if empty, so races/drivers start populated.
+Admin UI/endpoints control race state: start times, finish, podium.
 """
 
 import json
@@ -27,6 +42,10 @@ PLACEHOLDER_CONSTRUCTOR = {
     "name": "Mock",
     "nationality": "",
 }
+
+# OpenF1-style status values for session_result rows
+_STATUS_FINISHED = "Finished"
+_STATUS_DNF = "+1 Lap"
 
 
 def get_db():
@@ -199,6 +218,269 @@ def seed_if_empty():
             app.logger.warning("Seed failed for season %s", season)
 
 
+# ---------------------------------------------------------------------------
+# OpenF1 helpers
+# ---------------------------------------------------------------------------
+
+def _season_or_default() -> str:
+    return request.args.get("year", request.args.get("season", str(app.config['DEFAULT_SEASON'])))
+
+
+def _race_to_openf1_session(race: dict) -> dict:
+    """Convert a DB race row into an OpenF1 session record."""
+    r = dict(race)
+    # Prefer explicit start_override if present, else original date/time.
+    date = r.get("date") or ""
+    time_part = r.get("time") or ""
+    if r.get("start_override"):
+        try:
+            dt = datetime.fromisoformat(r["start_override"].replace("Z", "+00:00"))
+            date = dt.strftime("%Y-%m-%d")
+            time_part = dt.strftime("%H:%M:%SZ")
+        except Exception:
+            pass
+
+    date_start = f"{date}T{time_part}" if time_part else date
+    round_no = int(r.get("round") or 0)
+    return {
+        "session_key": round_no,
+        "session_name": r.get("race_name", "Race"),
+        "session_type": "Race",
+        "date_start": date_start,
+        "year": int(r.get("season") or _season_or_default()),
+        "meeting_key": round_no,
+        "circuit_short_name": r.get("circuit_name", ""),
+        "country_name": r.get("country", ""),
+        "location": r.get("locality", ""),
+    }
+
+
+def _driver_to_openf1(drv: dict) -> dict:
+    """Convert a DB driver row into an OpenF1 driver record."""
+    given = drv.get("given_name") or ""
+    family = drv.get("family_name") or ""
+    number = drv.get("permanent_number") or drv.get("code")
+    try:
+        driver_number = int(number) if number else None
+    except (ValueError, TypeError):
+        driver_number = None
+    return {
+        "driver_number": driver_number,
+        "full_name": f"{given} {family}".strip() or drv.get("driver_id", ""),
+        "first_name": given,
+        "last_name": family,
+        "name_acronym": drv.get("code", ""),
+        "driver_id": drv.get("driver_id", ""),
+        "team_name": "",
+        "country_code": _country_to_code(drv.get("nationality", "")),
+    }
+
+
+def _country_to_code(nationality: str) -> str:
+    """Best-effort nationality -> ISO country code for OpenF1 compatibility."""
+    mapping = {
+        "Dutch": "NL",
+        "British": "GB",
+        "Monegasque": "MC",
+        "Australian": "AU",
+        "German": "DE",
+        "French": "FR",
+        "Spanish": "ES",
+        "Italian": "IT",
+        "Canadian": "CA",
+        "Mexican": "MX",
+        "Finnish": "FI",
+        "Dane": "DK",
+        "Swiss": "CH",
+        "Thai": "TH",
+        "Japanese": "JP",
+        "Chinese": "CN",
+        "American": "US",
+        "Argentine": "AR",
+        "Brazilian": "BR",
+        "Austrian": "AT",
+        "Belgian": "BE",
+        "Hungarian": "HU",
+        "Polish": "PL",
+        "New Zealander": "NZ",
+        "Swedish": "SE",
+    }
+    return mapping.get(nationality, "")
+
+
+def _result_from_podium(drv: dict, position: int) -> dict:
+    """Build an OpenF1 session_result row from a driver and podium position."""
+    number = drv.get("permanent_number") or str(position)
+    try:
+        driver_number = int(number)
+    except (ValueError, TypeError):
+        driver_number = int(drv.get("code", "0")) or position
+    points_map = {1: 26, 2: 18, 3: 15}
+    return {
+        "position": position,
+        "driver_number": driver_number,
+        "points": points_map.get(position, 0),
+        "status": "Finished",
+        "dnf": False,
+        "dns": False,
+        "dsq": False,
+    }
+
+
+def _get_session_results(season: str, round_no: str):
+    """Return OpenF1-shaped session_result rows if the race is finished."""
+    db = get_db()
+    race = db.execute(
+        "SELECT * FROM races WHERE season = ? AND round = ?",
+        (season, round_no),
+    ).fetchone()
+    if not race or not race["has_results"]:
+        return []
+
+    podium_ids = [race["p1_driver_id"], race["p2_driver_id"], race["p3_driver_id"]]
+    if not any(podium_ids):
+        return []
+
+    drivers = {}
+    for did in podium_ids:
+        if did:
+            row = db.execute(
+                "SELECT * FROM drivers WHERE season = ? AND driver_id = ?",
+                (season, did),
+            ).fetchone()
+            if row:
+                drivers[did] = dict(row)
+
+    results = []
+    for pos, did in enumerate(podium_ids, 1):
+        if not did or did not in drivers:
+            continue
+        results.append(_result_from_podium(drivers[did], pos))
+    return results
+
+
+def _get_openf1_race_by_round(season: str, round_no: str) -> dict | None:
+    """Return an OpenF1 session/meeting-style record for a single round."""
+    db = get_db()
+    row = db.execute(
+        "SELECT * FROM races WHERE season = ? AND round = ?",
+        (season, round_no),
+    ).fetchone()
+    return _race_to_openf1_session(dict(row)) if row else None
+
+
+def _get_openf1_races(season: str) -> list[dict]:
+    """Return OpenF1-shaped sessions for all races in a season."""
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM races WHERE season = ? ORDER BY round",
+        (season,),
+    ).fetchall()
+    return [_race_to_openf1_session(dict(r)) for r in rows]
+
+
+def _get_openf1_drivers(season: str) -> list[dict]:
+    """Return OpenF1-shaped drivers for a season."""
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM drivers WHERE season = ? ORDER BY family_name",
+        (season,),
+    ).fetchall()
+    return [_driver_to_openf1(dict(r)) for r in rows]
+
+
+def _get_round_from_session_key(session_key: str) -> str:
+    """Map a session_key query param to a round string (the predictor expects round==key)."""
+    return str(session_key)
+
+
+# ---------------------------------------------------------------------------
+# OpenF1 routes
+# ---------------------------------------------------------------------------
+
+@app.route("/v1/sessions")
+def openf1_sessions():
+    """GET /v1/sessions?year=<season>&session_type=Race"""
+    session_type = request.args.get("session_type")
+    season = _season_or_default()
+    sessions = _get_openf1_races(season)
+    if session_type:
+        sessions = [s for s in sessions if s.get("session_type") == session_type]
+    return jsonify(sessions)
+
+
+@app.route("/v1/meetings")
+def openf1_meetings():
+    """GET /v1/meetings?year=<season>"""
+    season = _season_or_default()
+    meetings = []
+    for race in _get_openf1_races(season):
+        meetings.append({
+            "meeting_key": race["meeting_key"],
+            "meeting_name": race["session_name"],
+            "meeting_official_name": race["session_name"],
+            "date_start": race["date_start"],
+            "year": race["year"],
+            "circuit_short_name": race["circuit_short_name"],
+            "country_name": race["country_name"],
+            "location": race["location"],
+        })
+    return jsonify(meetings)
+
+
+@app.route("/v1/drivers")
+def openf1_drivers():
+    """GET /v1/drivers?session_key=<key> or ?year=<season>"""
+    session_key = request.args.get("session_key")
+    season = request.args.get("year", request.args.get("season"))
+    if session_key is not None:
+        # session_key maps 1:1 to round, but drivers are stored per-season;
+        # resolve season from the session.
+        round_no = _get_round_from_session_key(session_key)
+        db = get_db()
+        race = db.execute(
+            "SELECT season FROM races WHERE round = ?",
+            (round_no,),
+        ).fetchone()
+        season = race["season"] if race else (season or _season_or_default())
+    elif not season:
+        season = _season_or_default()
+    return jsonify(_get_openf1_drivers(season))
+
+
+@app.route("/v1/starting_grid")
+def openf1_starting_grid():
+    """GET /v1/starting_grid?session_key=<key>
+
+    The mock has no qualifying data; return an empty list.
+    """
+    return jsonify([])
+
+
+@app.route("/v1/session_result")
+def openf1_session_result():
+    """GET /v1/session_result?session_key=<key>"""
+    session_key = request.args.get("session_key")
+    if session_key is None:
+        return jsonify([])
+    round_no = _get_round_from_session_key(session_key)
+    season = _season_or_default()
+    return jsonify(_get_session_results(season, round_no))
+
+
+@app.route("/v1/race_control")
+def openf1_race_control():
+    """GET /v1/race_control?session_key=<key>
+
+    The mock has no race-control feed; return an empty list.
+    """
+    return jsonify([])
+
+
+# ---------------------------------------------------------------------------
+# Legacy Ergast routes (kept for backwards compatibility)
+# ---------------------------------------------------------------------------
+
 def _race_to_ergast(race_row, include_results=False):
     """Convert a race row to Ergast Race object. Use raw_json when available for full structure."""
     r = dict(race_row)
@@ -220,7 +502,7 @@ def _race_to_ergast(race_row, include_results=False):
         out = _race_to_ergast_minimal(r)
 
     if include_results and r.get("has_results"):
-        results = _get_results_for_race(r.get("season"), r.get("round"))
+        results = _get_results_for_race_ergast(r.get("season"), r.get("round"))
         if results:
             out["Results"] = results
     return out
@@ -273,7 +555,7 @@ def _driver_to_ergast(drv_row):
     }
 
 
-def _get_results_for_race(season, round_no):
+def _get_results_for_race_ergast(season, round_no):
     """Build Ergast Results array for a race from podium (p1,p2,p3)."""
     db = get_db()
     race = db.execute(
@@ -319,8 +601,6 @@ def _get_results_for_race(season, round_no):
     return results
 
 
-# --- API routes (Ergast format) ---
-
 def _mrdata_wrapper(race_table_key: str, content: dict, season: str = "", round_no: str = ""):
     """Wrap content in MRData.RaceTable/DriverTable structure."""
     path_parts = [season]
@@ -344,7 +624,7 @@ def _mrdata_wrapper(race_table_key: str, content: dict, season: str = "", round_
 
 @app.route("/")
 def index():
-    """Redirect to API or admin."""
+    """Redirect to admin."""
     return redirect(url_for("admin"))
 
 
@@ -356,7 +636,7 @@ def health():
 
 @app.route("/<season>.json")
 def api_season_races(season: str):
-    """GET /{season}.json - List all races for season."""
+    """GET /{season}.json - List all races for season (Ergast)."""
     db = get_db()
     rows = db.execute(
         "SELECT * FROM races WHERE season = ? ORDER BY round",
@@ -369,7 +649,7 @@ def api_season_races(season: str):
 
 @app.route("/<season>/drivers.json")
 def api_season_drivers(season: str):
-    """GET /{season}/drivers.json - List all drivers for season."""
+    """GET /{season}/drivers.json - List all drivers for season (Ergast)."""
     db = get_db()
     rows = db.execute(
         "SELECT * FROM drivers WHERE season = ? ORDER BY family_name",
@@ -388,7 +668,7 @@ def api_season_drivers(season: str):
 
 @app.route("/<season>/<round_no>/results.json")
 def api_race_results(season: str, round_no: str):
-    """GET /{season}/{round}/results.json - Race results (if finished)."""
+    """GET /{season}/{round}/results.json - Race results if finished (Ergast)."""
     db = get_db()
     race = db.execute(
         "SELECT * FROM races WHERE season = ? AND round = ?",
@@ -409,7 +689,9 @@ def api_race_results(season: str, round_no: str):
     return jsonify(wrap)
 
 
-# --- Admin routes ---
+# ---------------------------------------------------------------------------
+# Admin routes
+# ---------------------------------------------------------------------------
 
 @app.route("/admin")
 def admin():
