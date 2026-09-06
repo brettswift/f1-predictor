@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+
+{% block title %}{{ display_name_for(user_a) }} vs {{ display_name_for(user_b) }} - F1 Predictor{% endblock %}
+
+{% block extra_css %}
+<style>
+.h2h-heads{display:flex;align-items:center;justify-content:center;gap:20px;padding:6px 0 4px}
+.h2h-who{display:flex;align-items:center;gap:9px}
+.h2h-who .pfp{width:26px;height:26px;border-radius:50%;flex:0 0 auto;display:grid;place-items:center;font-size:14px;
+  background:rgba(255,255,255,.06);border:1px solid var(--line)}
+.h2h-vs{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--dimmer)}
+.tiles2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.tile{border:1px solid var(--line);border-radius:2px;padding:16px 16px 13px;
+  background:linear-gradient(180deg,var(--panel2),#0D1017)}
+.tile .cap{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--dimmer);margin-bottom:8px}
+.tile .row{display:flex;justify-content:space-between;align-items:baseline;padding:3px 0}
+.tile .row .val{font-family:var(--cond);font-weight:700;font-size:22px;font-variant-numeric:tabular-nums;
+  font-feature-settings:"tnum" 1}
+.tile .row .lbl{font-family:var(--sans);font-size:12.5px;color:var(--dim)}
+.tile.acc .row .val{color:var(--acc)}
+.matrix td,.matrix th{padding:7px 8px;text-align:center;font-family:var(--mono);font-size:11px}
+.matrix td:first-child,.matrix th:first-child{text-align:left;font-family:var(--sans);font-size:12.5px}
+.matrix .zero{color:#3E4354}
+.matrix .win{color:var(--acc);font-weight:600}
+</style>
+{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <div class="phead">
+    <h2>Head to Head</h2>
+    <span class="tag">Season {{ season }}</span>
+    <div class="rule"></div>
+    <a href="{{ url_for('head_to_head_picker') }}" class="lbl">Compare someone else</a>
+  </div>
+  <div class="pbody">
+    <div class="h2h-heads">
+      <span class="h2h-who"><span class="pfp">{{ avatar_for(user_a) }}</span><span>{{ display_name_for(user_a) }}</span></span>
+      <span class="h2h-vs">vs</span>
+      <span class="h2h-who"><span class="pfp">{{ avatar_for(user_b) }}</span><span>{{ display_name_for(user_b) }}</span></span>
+    </div>
+    <div class="tiles2">
+      <div class="tile">
+        <div class="cap">{{ display_name_for(user_a) }}</div>
+        <div class="row"><span class="lbl">Total points</span><span class="val num">{{ stats_a['total'] }}</span></div>
+        <div class="row"><span class="lbl">Avg / race</span><span class="val num">{{ stats_a['avg']|round(1) }}</span></div>
+        <div class="row"><span class="lbl">Races scored</span><span class="val num">{{ stats_a['races_scored'] }}</span></div>
+      </div>
+      <div class="tile">
+        <div class="cap">{{ display_name_for(user_b) }}</div>
+        <div class="row"><span class="lbl">Total points</span><span class="val num">{{ stats_b['total'] }}</span></div>
+        <div class="row"><span class="lbl">Avg / race</span><span class="val num">{{ stats_b['avg']|round(1) }}</span></div>
+        <div class="row"><span class="lbl">Races scored</span><span class="val num">{{ stats_b['races_scored'] }}</span></div>
+      </div>
+    </div>
+    <div class="tile acc" style="margin-top:12px">
+      <div class="cap">Head-to-head races</div>
+      <div class="row"><span class="lbl">{{ display_name_for(user_a) }} out-scored</span><span class="val num">{{ a_wins }}</span></div>
+      <div class="row"><span class="lbl">{{ display_name_for(user_b) }} out-scored</span><span class="val num">{{ b_wins }}</span></div>
+      <div class="row"><span class="lbl">Tied</span><span class="val num">{{ ties }}</span></div>
+    </div>
+  </div>
+</section>
+
+{% if races %}
+<section class="panel">
+  <div class="phead"><h2>Race by Race</h2><div class="rule"></div><span class="lbl">{{ races|length }} scored rounds</span></div>
+  <div class="table-scroll">
+    <table class="matrix">
+      <thead><tr>
+        <th>Player</th>
+        {% for race in races %}<th title="{{ race['name'] }}">R{{ race['round'] }}</th>{% endfor %}
+        <th>Total</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td>{{ display_name_for(user_a) }}</td>
+          {% for race in races %}
+          {% set va = matrix_a[race['id']] %}
+          {% set vb = matrix_b[race['id']] %}
+          <td class="{% if not (va is number and va) %}zero{% elif va is number and vb is number and va > vb %}win{% endif %}">{{ va }}</td>
+          {% endfor %}
+          <td><span class="pts">{{ stats_a['total'] }}</span></td>
+        </tr>
+        <tr>
+          <td>{{ display_name_for(user_b) }}</td>
+          {% for race in races %}
+          {% set va = matrix_a[race['id']] %}
+          {% set vb = matrix_b[race['id']] %}
+          <td class="{% if not (vb is number and vb) %}zero{% elif va is number and vb is number and vb > va %}win{% endif %}">{{ vb }}</td>
+          {% endfor %}
+          <td><span class="pts">{{ stats_b['total'] }}</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+{% else %}
+<section class="panel">
+  <div class="pbody"><p class="lbl">No completed races yet this season.</p></div>
+</section>
+{% endif %}
+{% endblock %}

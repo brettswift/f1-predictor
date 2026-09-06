@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Compare players - F1 Predictor{% endblock %}
+{% block content %}
+<section class="panel centered">
+  <div class="phead"><h2>Head to Head</h2><div class="rule"></div></div>
+  <div class="pbody">
+    <p>Pick two players to compare their season &mdash; total points, average per race, and how often each out-scored the other. Works for anyone, even players who've never shared a league.</p>
+    <form method="GET" action="{{ url_for('head_to_head_picker') }}" style="margin-top:18px">
+      <div class="field">
+        <label for="a">Player A</label>
+        <select id="a" name="a" required>
+          <option value="" disabled selected>Choose a player</option>
+          {% for u in users %}<option value="{{ u['username'] }}">{{ u['username'] }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="b">Player B</label>
+        <select id="b" name="b" required>
+          <option value="" disabled selected>Choose a player</option>
+          {% for u in users %}<option value="{{ u['username'] }}">{{ u['username'] }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="btnrow">
+        <button type="submit" class="btn"><span>Compare</span></button>
+        <a href="{{ url_for('leaderboard') }}" class="btn btn-secondary"><span>Cancel</span></a>
+      </div>
+    </form>
+  </div>
+</section>
+{% endblock %}

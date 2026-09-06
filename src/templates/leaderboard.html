@@ -52,6 +52,7 @@
       <a href="?season=2024">2024</a>
       {% if league %}<a href="/leaderboard">Global</a>{% else %}<a href="/leaderboard" class="{% if not season %}on{% endif %}">All</a>{% endif %}
     </div>
+    <a href="{{ url_for('head_to_head_picker') }}" class="lbl" style="margin-left:10px">Head to head &rarr;</a>
   </div>
   <div class="table-scroll">
   <table>
