@@ -23,10 +23,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Optional
 
 import requests
@@ -47,6 +50,34 @@ CACHE_STALE_AFTER_SEC = int(os.environ.get("OPENF1_CACHE_STALE_SEC", str(6 * 360
 # operational kill switch if upstream needs to be left alone.
 OFFLINE = os.environ.get("OPENF1_OFFLINE", "false").lower() == "true"
 
+# --------------------------------------------------------------------------
+# Rate-limit handling (F1-08 / BUD-167)
+# --------------------------------------------------------------------------
+
+# Base for exponential backoff on a 429 with no Retry-After header. Doubles
+# per attempt (attempt 1: base, attempt 2: 2*base, ...) with full jitter.
+RATE_LIMIT_BACKOFF_BASE_SEC = float(os.environ.get("OPENF1_RATE_LIMIT_BACKOFF_BASE_SEC", "2.0"))
+
+# Total time a single _get() call may spend asleep waiting out 429s. The
+# race-manager CronJob (base/race-manager-cronjob.yaml) runs on "*/5 * * * *"
+# (every 5 min / 300s) with concurrencyPolicy: Forbid, so a rate-limited call
+# that keeps honoring a large Retry-After can block the next scheduled run.
+# 60s leaves generous headroom under that window and still lets one
+# reasonable Retry-After (e.g. 30s) be honored in full.
+RATE_LIMIT_MAX_WAIT_SEC = float(os.environ.get("OPENF1_RATE_LIMIT_MAX_WAIT_SEC", "60"))
+
+# Process-wide minimum spacing between outbound requests — a token-bucket-
+# of-one so a dev loop or test run can't burst past OpenF1's limit the way
+# prod's fixed */5 cadence never does. The OpenF1 maintainer states
+# anonymous access is capped at "30 [requests] every 10 seconds"
+# (github.com/br-g/openf1 issue #113, comment 2024-10-26) — ~3 req/s, i.e.
+# ~0.33s apart. That's short enough not to add any real delay to the
+# handful of sequential requests one production cron run makes.
+MIN_REQUEST_INTERVAL_SEC = float(os.environ.get("OPENF1_MIN_REQUEST_INTERVAL_SEC", str(10 / 30)))
+
+_rate_limiter_lock = threading.Lock()
+_last_request_monotonic: Optional[float] = None
+
 
 class OpenF1Error(RuntimeError):
     """
@@ -54,9 +85,11 @@ class OpenF1Error(RuntimeError):
 
     Carries just enough about the underlying failure (status_code, is_timeout)
     for callers to classify the outcome for observability (BUD-125) without
-    parsing the message string. This does not change retry behavior — a 429
-    is still retried the same way a 5xx is; that distinction is tracked
-    separately (see BUD-125 notes).
+    parsing the message string. status_code == 429 is the marker BUD-125's
+    `fetch_attempts.outcome_for_error()` uses to record `rate_limited` instead
+    of the generic `http_error` — a 429 gets its own backoff/budget in
+    `_get()`'s retry loop (F1-08 / BUD-167), distinct from the linear backoff
+    used for 5xx/timeouts.
     """
 
     def __init__(self, message: str, *, status_code: Optional[int] = None,
@@ -157,10 +190,96 @@ def _cache_read(db: sqlite3.Connection, key: str) -> Optional[CachedResult]:
 # Core request path — everything upstream goes through here
 # --------------------------------------------------------------------------
 
+def _is_rate_limited(response: Optional["requests.Response"]) -> bool:
+    """
+    429 is unambiguous. OpenF1 has also been observed returning 403 for quota
+    exhaustion, so treat a 403 as rate-limited too, but only when the
+    response itself signals quota (a Retry-After header, or "quota"/"rate
+    limit" in the body) — a plain 403 (e.g. a genuinely forbidden endpoint)
+    must not be misclassified as rate limiting.
+    """
+    if response is None:
+        return False
+    if response.status_code == 429:
+        return True
+    if response.status_code == 403:
+        if "Retry-After" in response.headers:
+            return True
+        body = (response.text or "").lower()
+        if "quota" in body or "rate limit" in body:
+            return True
+    return False
+
+
+def _parse_retry_after(response: "requests.Response") -> Optional[float]:
+    """Retry-After per RFC 9110: either delay-seconds or an HTTP-date."""
+    value = response.headers.get("Retry-After")
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        dt = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
+
+
+def _rate_limit_wait_seconds(response: "requests.Response", attempt: int) -> tuple[float, str]:
+    """
+    How long to back off before retrying a rate-limited request, and why.
+
+    Honors Retry-After when the server sends one. Otherwise backs off
+    exponentially (doubling per attempt) with full jitter — not the linear
+    1.5s*attempt used for a general transport failure — so repeated retries
+    spread out instead of arriving in lockstep.
+    """
+    retry_after = _parse_retry_after(response)
+    if retry_after is not None:
+        return retry_after, "Retry-After header"
+    base = RATE_LIMIT_BACKOFF_BASE_SEC * (2 ** (attempt - 1))
+    return random.uniform(0, base), "exponential backoff with jitter"
+
+
+def _throttle() -> None:
+    """
+    Process-wide minimum spacing between outbound OpenF1 requests. A no-op
+    once the previous request is far enough in the past — at production's
+    */5 cadence that's every time, so this never adds latency there. Only a
+    tight loop (dev, tests, a retry burst) ever actually waits here.
+    """
+    global _last_request_monotonic
+    if MIN_REQUEST_INTERVAL_SEC <= 0:
+        return
+    with _rate_limiter_lock:
+        now = time.monotonic()
+        if _last_request_monotonic is not None:
+            wait = MIN_REQUEST_INTERVAL_SEC - (now - _last_request_monotonic)
+            if wait > 0:
+                time.sleep(wait)
+                now = time.monotonic()
+        _last_request_monotonic = now
+
+
 def _get(path: str, params: Optional[dict] = None,
          db: Optional[sqlite3.Connection] = None) -> CachedResult:
     """
     GET an OpenF1 endpoint, with retries, then last-known-good cache fallback.
+
+    A 429 (or quota-flavored 403) is handled distinctly from a general
+    transport failure: it honors Retry-After (or backs off exponentially
+    with jitter when absent), bounded by RATE_LIMIT_MAX_WAIT_SEC so a
+    rate-limited call fails fast and yields to the next scheduled cron run
+    rather than stacking requests inside one run. Either way, exhausting
+    retries falls through to the last-known-good cache exactly the same —
+    being rate-limited is never worse than an outage.
 
     Raises OpenF1Error only when upstream failed *and* nothing is cached —
     that is the one case where the caller genuinely has no data to show.
@@ -169,6 +288,8 @@ def _get(path: str, params: Optional[dict] = None,
     url = f"{OPENF1_BASE_URL}/{path.lstrip('/')}"
     key = _cache_key(path, params)
     last_exc: Optional[Exception] = None
+    rate_limited = False
+    rate_limit_wait_used = 0.0
 
     if OFFLINE:
         cached = _cache_read(db, key) if db is not None else None
@@ -177,6 +298,7 @@ def _get(path: str, params: Optional[dict] = None,
         raise OpenF1Error(f"OPENF1_OFFLINE is set and {key} is not cached")
 
     for attempt in range(1, RETRY_ATTEMPTS + 1):
+        _throttle()
         try:
             resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT_SEC)
             resp.raise_for_status()
@@ -184,15 +306,48 @@ def _get(path: str, params: Optional[dict] = None,
             if db is not None:
                 _cache_write(db, key, data)
             return CachedResult(data=data, fetched_at=datetime.now(timezone.utc))
+        except requests.HTTPError as exc:
+            last_exc = exc
+            if _is_rate_limited(exc.response):
+                rate_limited = True
+                sleep_for, source = _rate_limit_wait_seconds(exc.response, attempt)
+                remaining_budget = RATE_LIMIT_MAX_WAIT_SEC - rate_limit_wait_used
+                if attempt >= RETRY_ATTEMPTS or sleep_for > remaining_budget:
+                    logger.error(
+                        "OpenF1 %s rate-limited (HTTP %s) — giving up after %d attempt(s), "
+                        "%.1fs/%.1fs retry budget used: %s",
+                        key, exc.response.status_code, attempt,
+                        rate_limit_wait_used, RATE_LIMIT_MAX_WAIT_SEC, exc,
+                    )
+                    break
+                logger.warning(
+                    "OpenF1 %s rate-limited (HTTP %s, attempt %d/%d) — backing off %.1fs (%s)",
+                    key, exc.response.status_code, attempt, RETRY_ATTEMPTS, sleep_for, source,
+                )
+                rate_limit_wait_used += sleep_for
+                time.sleep(sleep_for)
+            else:
+                rate_limited = False
+                if attempt < RETRY_ATTEMPTS:
+                    sleep_for = RETRY_BACKOFF_SEC * attempt
+                    logger.warning("OpenF1 %s failed (attempt %d/%d): %s — retrying in %.1fs",
+                                   key, attempt, RETRY_ATTEMPTS, exc, sleep_for)
+                    time.sleep(sleep_for)
         except (requests.RequestException, ValueError) as exc:
             last_exc = exc
+            rate_limited = False
             if attempt < RETRY_ATTEMPTS:
                 sleep_for = RETRY_BACKOFF_SEC * attempt
                 logger.warning("OpenF1 %s failed (attempt %d/%d): %s — retrying in %.1fs",
                                key, attempt, RETRY_ATTEMPTS, exc, sleep_for)
                 time.sleep(sleep_for)
 
-    logger.error("OpenF1 %s failed after %d attempts: %s", key, RETRY_ATTEMPTS, last_exc)
+    if rate_limited:
+        logger.error("OpenF1 %s exhausted rate-limit retry budget (%.1fs used): %s",
+                      key, rate_limit_wait_used, last_exc)
+    else:
+        logger.error("OpenF1 %s failed after %d attempts: %s", key, RETRY_ATTEMPTS, last_exc)
+
     if db is not None:
         cached = _cache_read(db, key)
         if cached is not None:
@@ -203,6 +358,12 @@ def _get(path: str, params: Optional[dict] = None,
     is_timeout = isinstance(last_exc, requests.Timeout)
     if isinstance(last_exc, requests.HTTPError) and last_exc.response is not None:
         status_code = last_exc.response.status_code
+    if rate_limited:
+        raise OpenF1Error(
+            f"OpenF1 rate limit exceeded and no cache available: {key}: {last_exc}",
+            status_code=status_code,
+            is_timeout=is_timeout,
+        )
     raise OpenF1Error(
         f"OpenF1 request failed and no cache available: {key}: {last_exc}",
         status_code=status_code,
