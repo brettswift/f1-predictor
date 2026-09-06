@@ -153,7 +153,7 @@
             </div>
 
             {% if race['status'] == 'locked' %}
-                {% if race['id'] in predictions %}
+                {% if predictions.get(race['id']) %}
                 <div style="margin-top: 10px;">
                     <span style="font-size: 12px; opacity: 0.7;">Your prediction:</span>
                     <div class="prediction-row">
@@ -177,7 +177,7 @@
                     </div>
                 </div>
                 {% endif %}
-                {% if race['id'] in predictions %}
+                {% if predictions.get(race['id']) %}
                 <div style="margin-top: 8px; display: flex; justify-content: space-between; align-items: center;">
                     <span style="font-size: 12px; opacity: 0.7;">Your points:</span>
                     <span class="points-earned">+{{ user_points_per_race.get(race['id'], 0) }}</span>
@@ -185,7 +185,7 @@
                 {% endif %}
             {% else %}
                 <div style="margin-top: 10px;">
-                    {% if race['id'] in predictions %}
+                    {% if predictions.get(race['id']) %}
                     <div class="prediction-row">
                         <div class="prediction-item">🥇 {{ predictions[race['id']]['p1_name'].split()[-1] }}</div>
                         <div class="prediction-item">🥈 {{ predictions[race['id']]['p2_name'].split()[-1] }}</div>

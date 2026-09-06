@@ -1939,9 +1939,13 @@ def live():
     # Filter to current season and add slug
     races = []
     for r in all_races:
-        if str(r['date'].year) == str(season):
-            r['slug'] = race_slug(r)
-            races.append(r)
+        # BUD-149: races.date is stored as TEXT (naive UTC); parse before
+        # comparing, and skip rows with unparseable dates rather than 500.
+        race_start = _parse_race_datetime(r['date'])
+        if race_start is None or str(race_start.year) != str(season):
+            continue
+        r['slug'] = race_slug(r)
+        races.append(r)
 
     # Get current user's predictions for all races
     predictions = {}
