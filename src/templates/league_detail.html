@@ -6,6 +6,7 @@
     <h2>{{ league['emoji_or_color'] }} {{ league['name'] }}</h2>
     <span class="tag">{% if league['whole_season'] %}Whole season{% else %}Round {{ league['start_round'] }} forward{% endif %}</span>
     <div class="rule"></div>
+    <a href="{{ url_for('leaderboard') }}?league={{ league['id'] }}" class="btn btn-sm"><span>Standings</span></a>
     {% if is_member %}<a href="{{ url_for('league_invite', league_id=league['id']) }}" class="btn btn-sm"><span>Invite</span></a>{% endif %}
   </div>
 </section>

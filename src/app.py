@@ -1627,30 +1627,27 @@ def get_recent_form(db, session_id, limit=5):
 def get_standings(db, league=None, limit=12):
     """Podium points, safety-car pool and total, optionally scoped to a league.
 
-    A league is a lens on the same global game: same picks, same points, just a
-    smaller field and (optionally) a later starting round.
+    A league is a pure filter over the same global scores table (BUD-152 /
+    F1-22): same picks, same points, just a smaller field. There is no
+    scoring window — leagues score the full season exactly like the global
+    leaderboard, so a late joiner simply has no scores rows (hence zero
+    points) for the rounds before they joined. leagues.start_round is
+    display-only and must not gate scoring here.
     """
+    where = "u.is_synthetic = 0"
     args = []
-    where = ["u.is_synthetic = 0"]
-    join = ""
     if league:
-        join = "JOIN league_members lm ON lm.user_id = u.session_id AND lm.league_id = ?"
+        where += " AND u.session_id IN (SELECT user_id FROM league_members WHERE league_id = ?)"
         args.append(league['id'])
-    round_clause = ""
-    if league and not league['whole_season'] and league['start_round']:
-        round_clause = "AND r.round >= ?"
     try:
         sql = f'''
             SELECT u.*, COALESCE(SUM(s.points), 0) AS podium_points
             FROM users u
-            {join}
             LEFT JOIN scores s ON s.user_id = u.session_id
-            LEFT JOIN races r ON r.id = s.race_id {round_clause}
-            WHERE {" AND ".join(where)}
+            LEFT JOIN races r ON r.id = s.race_id
+            WHERE {where}
             GROUP BY u.session_id
         '''
-        if round_clause:
-            args.append(league['start_round'])
         rows = db.execute(sql, tuple(args)).fetchall()
     except Exception:
         return []
@@ -1837,6 +1834,8 @@ def leaderboard():
     Query params:
         season: Filter by season year (e.g. ?season=2026).
                 If 'current' or omitted, defaults to current year.
+        league: Filter to a league's members (BUD-152 / F1-22) — a pure
+                filter over the same scores table; only members may view.
     """
     user = get_current_user()
     if not user:
@@ -1856,9 +1855,23 @@ def leaderboard():
         except ValueError:
             filter_year = current_year
 
-    # Build race filter for SQL
-    race_filter_sql = "AND strftime('%Y', r.date) = ?"
-    race_filter_args = (str(filter_year),)
+    # BUD-152 / F1-22: optional league filter. A league's standings are a
+    # pure filter over the same scores table the global view reads - same
+    # season window, no scoring window of its own, nothing else added. Only
+    # a member can view their league's table; an unknown ?league= silently
+    # falls back to the global view.
+    league_id = request.args.get('league', type=int)
+    league = None
+    if league_id is not None:
+        league = db.execute('SELECT * FROM leagues WHERE id = ?', (league_id,)).fetchone()
+        if league is None or not is_league_member(db, league_id, user['session_id']):
+            league = None
+
+    league_filter = ""
+    league_args = ()
+    if league is not None:
+        league_filter = "AND u.session_id IN (SELECT user_id FROM league_members WHERE league_id = ?)"
+        league_args = (league['id'],)
 
     # Get users with scores filtered by season
     # F1-111: exclude synthetic replay/persona users from public leaderboards.
@@ -1866,24 +1879,11 @@ def leaderboard():
         SELECT u.*, COALESCE(SUM(s.points), 0) as total_score
         FROM users u
         LEFT JOIN scores s ON u.session_id = s.user_id
-        LEFT JOIN races r ON s.race_id = r.id
-        WHERE u.is_synthetic = 0
-        GROUP BY u.session_id
-        HAVING COUNT(CASE WHEN r.id IS NOT NULL THEN 1 END) = 0
-           OR SUM(CASE WHEN strftime('%Y', r.date) = ? THEN s.points ELSE 0 END) >= 0
-        ORDER BY total_score DESC
-    ''', (str(filter_year),)).fetchall()
-
-    # Re-query properly: users and their scores from races in the selected season
-    users = db.execute(f'''
-        SELECT u.*, COALESCE(SUM(s.points), 0) as total_score
-        FROM users u
-        LEFT JOIN scores s ON u.session_id = s.user_id
         LEFT JOIN races r ON s.race_id = r.id AND strftime('%Y', r.date) = ?
-        WHERE u.is_synthetic = 0
+        WHERE u.is_synthetic = 0 {league_filter}
         GROUP BY u.session_id
         ORDER BY total_score DESC
-    ''', (str(filter_year),)).fetchall()
+    ''', (str(filter_year),) + league_args).fetchall()
 
     # Get races in the selected season
     races = db.execute('''
@@ -1910,6 +1910,7 @@ def leaderboard():
                           score_matrix=score_matrix,
                           current_user=user,
                           season=filter_year,
+                          league=league,
                           sc_pools=get_sc_pools(db),
                           sc_pool_start=SC_POOL_START)
 

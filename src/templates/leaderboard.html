@@ -28,13 +28,14 @@
 <section class="panel">
   <div class="phead">
     <h2>Standings</h2>
-    {% if season %}<span class="tag acc">Season {{ season }}</span>{% endif %}
+    {% if league %}<span class="tag acc">{{ league['emoji_or_color'] }} {{ league['name'] }}</span>{% endif %}
+    {% if season %}<span class="tag">Season {{ season }}</span>{% endif %}
     <div class="rule"></div>
     <div class="seasons">
-      <a href="?season=current" class="{% if season %}on{% endif %}">Current</a>
+      <a href="?season=current" class="{% if not league and season %}on{% endif %}">Current</a>
       <a href="?season=2025">2025</a>
       <a href="?season=2024">2024</a>
-      <a href="/leaderboard">All</a>
+      {% if league %}<a href="/leaderboard">Global</a>{% else %}<a href="/leaderboard" class="{% if not season %}on{% endif %}">All</a>{% endif %}
     </div>
   </div>
   <div class="table-scroll">
