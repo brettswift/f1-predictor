@@ -32,6 +32,12 @@
   <div class="lbl" style="margin-top:10px">{{ race['date'][:10] }} · {{ f1_season }} season</div>
 </section>
 
+{% if race_winners %}
+<section class="panel" style="padding:12px 18px">
+  <span class="lbl">Race winner: <strong>{% for w in race_winners %}{{ display_name_for(w) }}{% if not loop.last %}, {% endif %}{% endfor %}</strong></span>
+</section>
+{% endif %}
+
 {% if result_names %}
 <section class="panel">
   <div class="phead"><h2>Result</h2><span class="tag pos">Final</span><div class="rule"></div></div>

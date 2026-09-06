@@ -29,6 +29,9 @@
 .scmeter{display:flex;align-items:center;gap:8px}
 .scmeter .m{height:4px;background:#1C2130;border-radius:3px;flex:1;min-width:36px;overflow:hidden}
 .scmeter .m i{display:block;height:100%;border-radius:3px;background:linear-gradient(90deg,rgba(255,180,61,.4),var(--warn))}
+.race-winners{padding:10px 0 0;border-top:1px solid var(--line);margin-top:10px}
+.rw-line{font-family:var(--mono);font-size:11px;color:var(--dim);padding:3px 0}
+.rw-line strong{color:var(--tx);font-weight:600}
 </style>
 {% endblock %}
 
@@ -157,6 +160,16 @@
         {% endfor %}
       </tbody>
     </table>
+  </div>
+  <div class="race-winners">
+    {% for race in races %}
+    <div class="rw-line">R{{ race['round'] }} {{ race['name'] }} — Race winner:
+      <strong>
+        {% set winners = race_winners.get(race['id'], []) %}
+        {% if winners %}{% for w in winners %}{{ display_name_for(w) }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}—{% endif %}
+      </strong>
+    </div>
+    {% endfor %}
   </div>
 </section>
 {% endif %}

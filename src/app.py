@@ -2013,6 +2013,27 @@ def leaderboard():
             ).fetchone()
             score_matrix[u['session_id']][race['id']] = score['points'] if score else '-'
 
+    # F1-24: per-race winner(s), global scope or league scope. Reuses the
+    # exact `league_filter` / `league_args` membership filter built above for
+    # the standings query (F1-22) rather than a separate winner-calculation
+    # path — no league scope means the global field, a league scope means
+    # only that league's members are considered. A tie lists every tied user;
+    # a late joiner with one scored race is eligible like anyone else since
+    # league_filter is membership-only, with no join-round predicate.
+    race_winners = {}
+    for race in races:
+        winner_rows = db.execute(f'''
+            SELECT u.session_id, u.username, u.display_name, u.avatar_emoji, s.points
+            FROM scores s
+            JOIN users u ON u.session_id = s.user_id
+            WHERE s.race_id = ? AND u.is_synthetic = 0 {league_filter}
+        ''', (race['id'],) + league_args).fetchall()
+        if not winner_rows:
+            race_winners[race['id']] = []
+            continue
+        max_points = max(row['points'] for row in winner_rows)
+        race_winners[race['id']] = [dict(row) for row in winner_rows if row['points'] == max_points]
+
     return render_template('leaderboard.html',
                           users=users,
                           ranked_users=ranked_users,
@@ -2021,6 +2042,7 @@ def leaderboard():
                                         if mode == 'average' else ranked_users),
                           races=races,
                           score_matrix=score_matrix,
+                          race_winners=race_winners,
                           current_user=user,
                           season=filter_year,
                           league=league,
@@ -2344,11 +2366,25 @@ def _race_detail_impl(race_id, db, user):
     ''', (race_id,)).fetchall()
 
     scores_by_user = {}
+    race_winners = []
     if has_results:
-        for row in db.execute('SELECT user_id, points FROM scores WHERE race_id = ?', (race_id,)).fetchall():
+        # F1-24: winner(s) are the user(s) with MAX(points) for this race,
+        # global scope (no league filter here — race_detail has no league
+        # context; the league-scoped view lives on /leaderboard). A tie is
+        # listed in full rather than picking one arbitrarily.
+        score_rows = db.execute('''
+            SELECT s.user_id, s.points, u.username, u.display_name, u.avatar_emoji
+            FROM scores s
+            JOIN users u ON u.session_id = s.user_id
+            WHERE s.race_id = ? AND u.is_synthetic = 0
+        ''', (race_id,)).fetchall()
+        for row in score_rows:
             scores_by_user[row['user_id']] = row['points']
+        if score_rows:
+            max_points = max(row['points'] for row in score_rows)
+            race_winners = [dict(row) for row in score_rows if row['points'] == max_points]
 
-    return (race, has_results, result_names, result_ids, predictions, scores_by_user)
+    return (race, has_results, result_names, result_ids, predictions, scores_by_user, race_winners)
 
 
 @app.route('/race/<int:race_id>')
@@ -2385,7 +2421,7 @@ def race_detail(slug):
     if not data:
         return redirect(url_for('index'), code=302)
 
-    race, has_results, result_names, result_ids, predictions, scores_by_user = data
+    race, has_results, result_names, result_ids, predictions, scores_by_user, race_winners = data
 
     return render_template('race_detail.html',
                           race=race,
@@ -2393,7 +2429,8 @@ def race_detail(slug):
                           predictions=predictions,
                           result_names=result_names,
                           result_ids=result_ids or {},
-                          scores_by_user=scores_by_user)
+                          scores_by_user=scores_by_user,
+                          race_winners=race_winners)
 
 
 def _build_sitemap():
