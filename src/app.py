@@ -1430,22 +1430,101 @@ def get_user_leagues(db, user_id):
 
 
 def remove_league_member(db, league_id, user_id):
-    """Delete one membership row (F1-26 / BUD-155's minimal removal path).
+    """Delete one membership row - self-leave (BUD-155) or admin-remove (BUD-156).
 
     Only ever touches league_members - predictions and scores are the
     global game's rows and are never league-scoped (E3), so removing a
     member from one league cannot change their standing anywhere else,
-    including their other leagues and the global leaderboard.
-
-    This is intentionally self-service-only (a member leaving their own
-    league). Admin-removes-another-member is BUD-156's full admin UI and
-    is out of scope here.
+    including their other leagues and the global leaderboard. Callers are
+    responsible for any permission check (self vs. admin-removing-another).
     """
     db.execute(
         'DELETE FROM league_members WHERE league_id = ? AND user_id = ?',
         (league_id, user_id)
     )
     db.commit()
+
+
+def is_league_admin(db, league_id, user_id):
+    """True if user_id holds the admin seat in this league right now."""
+    row = db.execute(
+        'SELECT 1 FROM league_members WHERE league_id = ? AND user_id = ? AND is_admin = 1',
+        (league_id, user_id)
+    ).fetchone()
+    return row is not None
+
+
+def rename_league(db, league_id, new_name):
+    """Rename a league in place (BUD-156). Only `leagues.name` changes -
+    membership, predictions, and scores rows are untouched (row counts
+    unchanged before/after), same invariant as create_league.
+    """
+    new_name = (new_name or '').strip()
+    if not new_name:
+        raise ValueError('League name is required')
+    db.execute('UPDATE leagues SET name = ? WHERE id = ?', (new_name, league_id))
+    db.commit()
+
+
+def transfer_league_admin(db, league_id, from_user_id, to_user_id):
+    """Move the admin seat from one member to another (BUD-156).
+
+    Both users must already be members of this league. Updates the
+    league_members.is_admin flag (the flag every admin-only check reads)
+    and leagues.admin_user_id (kept in sync as the historical/creator
+    record) together so there is never a moment with two or zero admins.
+    """
+    if not is_league_member(db, league_id, to_user_id):
+        raise ValueError('New admin must already be a member of this league')
+    db.execute(
+        'UPDATE league_members SET is_admin = 0 WHERE league_id = ? AND user_id = ?',
+        (league_id, from_user_id)
+    )
+    db.execute(
+        'UPDATE league_members SET is_admin = 1 WHERE league_id = ? AND user_id = ?',
+        (league_id, to_user_id)
+    )
+    db.execute('UPDATE leagues SET admin_user_id = ? WHERE id = ?', (to_user_id, league_id))
+    db.commit()
+
+
+def delete_league(db, league_id):
+    """Delete a league and only its own rows (BUD-156).
+
+    Per §3.5, deleting a league never deletes predictions or global
+    history: this touches league_members and leagues only. There is no
+    persisted league_invites table (invite links are stateless signed
+    tokens - see league_invite()/league_join()), so once the leagues row
+    is gone any outstanding invite link 404s on lookup with nothing left
+    to clean up. predictions/scores/races/results are never referenced
+    here, by table and by construction.
+    """
+    db.execute('DELETE FROM league_members WHERE league_id = ?', (league_id,))
+    db.execute('DELETE FROM leagues WHERE id = ?', (league_id,))
+    db.commit()
+
+
+def reassign_admin_before_leaving(db, league_id, leaving_user_id):
+    """Sole-admin-leaves handling (BUD-156, open question resolved here).
+
+    If leaving_user_id is this league's admin and other members remain,
+    auto-transfer the admin seat to the longest-tenured other member
+    (earliest joined_at, ties broken by user_id for determinism) before
+    the caller deletes the leaving member's row. If no other members
+    remain, there is nothing to reassign - the league simply ends up with
+    zero members, which is not the "admin-less with members present"
+    state the AC forbids. Non-admin members leaving are a no-op here.
+    """
+    if not is_league_admin(db, league_id, leaving_user_id):
+        return
+    successor = db.execute(
+        '''SELECT user_id FROM league_members
+           WHERE league_id = ? AND user_id != ?
+           ORDER BY joined_at ASC, user_id ASC LIMIT 1''',
+        (league_id, leaving_user_id)
+    ).fetchone()
+    if successor is not None:
+        transfer_league_admin(db, league_id, leaving_user_id, successor['user_id'])
 
 # --- Routes ---
 
@@ -2240,7 +2319,9 @@ def league_detail(league_id):
     return render_template('league_detail.html',
                           league=league,
                           members=members,
-                          is_member=is_league_member(db, league_id, user['session_id']))
+                          is_member=is_league_member(db, league_id, user['session_id']),
+                          is_league_admin=is_league_admin(db, league_id, user['session_id']),
+                          current_user_id=user['session_id'])
 
 
 @app.route('/leagues/<int:league_id>/invite')
@@ -2312,11 +2393,14 @@ def league_join(token):
 
 @app.route('/leagues/<int:league_id>/leave', methods=['POST'])
 def league_leave(league_id):
-    """Leave a league (F1-26, minimal path). Self-service only.
+    """Leave a league. Self-service only (E3 / BUD-155, sole-admin case BUD-156).
 
     Removes just the league_members row - predictions/scores are global
     and untouched, so the user's other leagues and the global leaderboard
-    are unaffected (E3 / BUD-155).
+    are unaffected. If the leaving member is the sole admin and other
+    members remain, the admin seat auto-transfers to the longest-tenured
+    other member first (reassign_admin_before_leaving) so the league is
+    never left admin-less while members are still present.
     """
     user = get_current_user()
     if not user:
@@ -2332,8 +2416,129 @@ def league_leave(league_id):
         flash('You are not a member of this league', 'error')
         return redirect(url_for('leagues'))
 
+    reassign_admin_before_leaving(db, league_id, user['session_id'])
     remove_league_member(db, league_id, user['session_id'])
     flash(f"You have left {league['name']}", 'success')
+    return redirect(url_for('leagues'))
+
+
+@app.route('/leagues/<int:league_id>/rename', methods=['POST'])
+def league_rename(league_id):
+    """Rename a league (BUD-156). Admin-only; membership/predictions/scores untouched."""
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+
+    db = get_db()
+    league = db.execute('SELECT * FROM leagues WHERE id = ?', (league_id,)).fetchone()
+    if not league:
+        flash('League not found', 'error')
+        return redirect(url_for('leagues'))
+
+    if not is_league_admin(db, league_id, user['session_id']):
+        flash('Only the league admin can rename this league', 'error')
+        return redirect(url_for('league_detail', league_id=league_id))
+
+    try:
+        rename_league(db, league_id, request.form.get('name', ''))
+    except ValueError as e:
+        flash(str(e), 'error')
+        return redirect(url_for('league_detail', league_id=league_id))
+
+    flash('League renamed', 'success')
+    return redirect(url_for('league_detail', league_id=league_id))
+
+
+@app.route('/leagues/<int:league_id>/remove-member', methods=['POST'])
+def league_remove_member(league_id):
+    """Admin removes another member from the league (BUD-156).
+
+    Only touches league_members - the removed member's predictions/scores
+    and global leaderboard total are untouched. Use /leave to remove
+    yourself; this route is for removing someone else.
+    """
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+
+    db = get_db()
+    league = db.execute('SELECT * FROM leagues WHERE id = ?', (league_id,)).fetchone()
+    if not league:
+        flash('League not found', 'error')
+        return redirect(url_for('leagues'))
+
+    if not is_league_admin(db, league_id, user['session_id']):
+        flash('Only the league admin can remove members', 'error')
+        return redirect(url_for('league_detail', league_id=league_id))
+
+    target_user_id = request.form.get('user_id', '')
+    if target_user_id == user['session_id']:
+        flash('Use "Leave league" to remove yourself', 'error')
+        return redirect(url_for('league_detail', league_id=league_id))
+    if not is_league_member(db, league_id, target_user_id):
+        flash('That user is not a member of this league', 'error')
+        return redirect(url_for('league_detail', league_id=league_id))
+
+    remove_league_member(db, league_id, target_user_id)
+    flash('Member removed', 'success')
+    return redirect(url_for('league_detail', league_id=league_id))
+
+
+@app.route('/leagues/<int:league_id>/transfer-admin', methods=['POST'])
+def league_transfer_admin(league_id):
+    """Admin hands the admin seat to another member (BUD-156)."""
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+
+    db = get_db()
+    league = db.execute('SELECT * FROM leagues WHERE id = ?', (league_id,)).fetchone()
+    if not league:
+        flash('League not found', 'error')
+        return redirect(url_for('leagues'))
+
+    if not is_league_admin(db, league_id, user['session_id']):
+        flash('Only the league admin can transfer admin status', 'error')
+        return redirect(url_for('league_detail', league_id=league_id))
+
+    target_user_id = request.form.get('user_id', '')
+    if target_user_id == user['session_id']:
+        flash('That user is already the admin', 'error')
+        return redirect(url_for('league_detail', league_id=league_id))
+
+    try:
+        transfer_league_admin(db, league_id, user['session_id'], target_user_id)
+    except ValueError as e:
+        flash(str(e), 'error')
+        return redirect(url_for('league_detail', league_id=league_id))
+
+    flash('Admin status transferred', 'success')
+    return redirect(url_for('league_detail', league_id=league_id))
+
+
+@app.route('/leagues/<int:league_id>/delete', methods=['POST'])
+def league_delete(league_id):
+    """Admin deletes the league (BUD-156).
+
+    Removes only the league's own rows (leagues + league_members); never
+    touches predictions/scores/races/results - see delete_league().
+    """
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+
+    db = get_db()
+    league = db.execute('SELECT * FROM leagues WHERE id = ?', (league_id,)).fetchone()
+    if not league:
+        flash('League not found', 'error')
+        return redirect(url_for('leagues'))
+
+    if not is_league_admin(db, league_id, user['session_id']):
+        flash('Only the league admin can delete this league', 'error')
+        return redirect(url_for('league_detail', league_id=league_id))
+
+    delete_league(db, league_id)
+    flash(f"{league['name']} deleted", 'success')
     return redirect(url_for('leagues'))
 
 
