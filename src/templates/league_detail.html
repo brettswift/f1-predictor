@@ -8,6 +8,11 @@
     <div class="rule"></div>
     <a href="{{ url_for('leaderboard') }}?league={{ league['id'] }}" class="btn btn-sm"><span>Standings</span></a>
     {% if is_member %}<a href="{{ url_for('league_invite', league_id=league['id']) }}" class="btn btn-sm"><span>Invite</span></a>{% endif %}
+    {% if is_member %}
+    <form method="POST" action="{{ url_for('league_leave', league_id=league['id']) }}" style="display:inline">
+      <button type="submit" class="btn btn-sm btn-secondary" onclick="return confirm('Leave {{ league['name'] }}?')"><span>Leave league</span></button>
+    </form>
+    {% endif %}
   </div>
 </section>
 

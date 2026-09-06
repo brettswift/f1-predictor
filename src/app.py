@@ -1428,6 +1428,25 @@ def get_user_leagues(db, user_id):
         (user_id,)
     ).fetchall()
 
+
+def remove_league_member(db, league_id, user_id):
+    """Delete one membership row (F1-26 / BUD-155's minimal removal path).
+
+    Only ever touches league_members - predictions and scores are the
+    global game's rows and are never league-scoped (E3), so removing a
+    member from one league cannot change their standing anywhere else,
+    including their other leagues and the global leaderboard.
+
+    This is intentionally self-service-only (a member leaving their own
+    league). Admin-removes-another-member is BUD-156's full admin UI and
+    is out of scope here.
+    """
+    db.execute(
+        'DELETE FROM league_members WHERE league_id = ? AND user_id = ?',
+        (league_id, user_id)
+    )
+    db.commit()
+
 # --- Routes ---
 
 @app.route('/')
@@ -2289,6 +2308,33 @@ def league_join(token):
     db.commit()
     flash('You have joined the league!', 'success')
     return redirect(url_for('league_detail', league_id=league_id))
+
+
+@app.route('/leagues/<int:league_id>/leave', methods=['POST'])
+def league_leave(league_id):
+    """Leave a league (F1-26, minimal path). Self-service only.
+
+    Removes just the league_members row - predictions/scores are global
+    and untouched, so the user's other leagues and the global leaderboard
+    are unaffected (E3 / BUD-155).
+    """
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+
+    db = get_db()
+    league = db.execute('SELECT * FROM leagues WHERE id = ?', (league_id,)).fetchone()
+    if not league:
+        flash('League not found', 'error')
+        return redirect(url_for('leagues'))
+
+    if not is_league_member(db, league_id, user['session_id']):
+        flash('You are not a member of this league', 'error')
+        return redirect(url_for('leagues'))
+
+    remove_league_member(db, league_id, user['session_id'])
+    flash(f"You have left {league['name']}", 'success')
+    return redirect(url_for('leagues'))
 
 
 @app.route('/races')
