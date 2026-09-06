@@ -14,19 +14,43 @@
     </form>
     {% endif %}
   </div>
+  {% if is_league_admin %}
+  <div class="rule"></div>
+  <form method="POST" action="{{ url_for('league_rename', league_id=league['id']) }}" style="display:inline-flex;gap:6px;align-items:center">
+    <input type="text" name="name" value="{{ league['name'] }}" required>
+    <button type="submit" class="btn btn-sm"><span>Rename</span></button>
+  </form>
+  <form method="POST" action="{{ url_for('league_delete', league_id=league['id']) }}" style="display:inline">
+    <button type="submit" class="btn btn-sm btn-secondary" onclick="return confirm('Delete {{ league['name'] }}? This cannot be undone. Predictions and scores are never affected.')"><span>Delete league</span></button>
+  </form>
+  {% endif %}
 </section>
 
 <section class="panel">
   <div class="phead"><h2>Members</h2><span class="tag acc">{{ members|length }}</span><div class="rule"></div></div>
   <div class="table-scroll">
     <table>
-      <thead><tr><th>Player</th><th style="width:100px">Role</th><th style="width:180px">Joined</th></tr></thead>
+      <thead><tr><th>Player</th><th style="width:100px">Role</th><th style="width:180px">Joined</th>{% if is_league_admin %}<th style="width:220px">Admin actions</th>{% endif %}</tr></thead>
       <tbody>
         {% for member in members %}
         <tr>
           <td>{{ member['user_id'] }}</td>
           <td><span class="tag {% if member['is_admin'] %}acc{% endif %}">{{ 'Admin' if member['is_admin'] else 'Member' }}</span></td>
           <td><span class="num" style="font-size:11px;color:var(--dim)">{{ member['joined_at'] }}</span></td>
+          {% if is_league_admin %}
+          <td>
+            {% if member['user_id'] != current_user_id %}
+            <form method="POST" action="{{ url_for('league_transfer_admin', league_id=league['id']) }}" style="display:inline">
+              <input type="hidden" name="user_id" value="{{ member['user_id'] }}">
+              <button type="submit" class="btn btn-sm" onclick="return confirm('Make {{ member['user_id'] }} the admin?')"><span>Make admin</span></button>
+            </form>
+            <form method="POST" action="{{ url_for('league_remove_member', league_id=league['id']) }}" style="display:inline">
+              <input type="hidden" name="user_id" value="{{ member['user_id'] }}">
+              <button type="submit" class="btn btn-sm btn-secondary" onclick="return confirm('Remove {{ member['user_id'] }} from this league?')"><span>Remove</span></button>
+            </form>
+            {% endif %}
+          </td>
+          {% endif %}
         </tr>
         {% endfor %}
       </tbody>
