@@ -47,6 +47,12 @@ LIVE_REFRESH_INTERVAL_SEC = 30  # Auto-refresh every 30 seconds
 LIVE_RATE_LIMIT_SEC = 10  # Minimum time between API calls
 LIVE_CACHE_TTL_SEC = 5  # Cache live data for 5 seconds
 
+# F1-23 / BUD-153: dual ranking modes for the standings views.
+RANKING_MODES = ('total', 'average')
+# Minimum scored races in the view's window for a user to be *ranked* in
+# Average mode (avoids one-race artifacts, e.g. a single 100% race).
+MIN_RANKED_AVERAGE_RACES = 2
+
 # Magic-link authentication configuration
 LOGIN_TOKEN_BYTES = 32  # URL-safe token length
 LOGIN_TOKEN_TTL_MINUTES = 15  # Token validity window
@@ -210,6 +216,7 @@ def init_db():
             display_name TEXT,
             avatar_emoji TEXT,
             favorite_driver_id INTEGER REFERENCES drivers(id),
+            ranking_mode TEXT CHECK (ranking_mode IN ('total', 'average')),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -442,6 +449,13 @@ def _apply_migrations(db):
         # validates the id exists in drivers before writing it.
         db.execute('ALTER TABLE users ADD COLUMN favorite_driver_id INTEGER')
         app.logger.info('Migration: users.favorite_driver_id added')
+
+    # F1-23 / BUD-153: persisted leaderboard ranking mode (total|average).
+    # NULL (the default) means "total" — the historical behavior.
+    if 'ranking_mode' not in users:
+        db.execute('ALTER TABLE users ADD COLUMN ranking_mode '
+                   'CHECK (ranking_mode IN (\'total\', \'average\'))')
+        app.logger.info('Migration: users.ranking_mode added')
 
 # --- API fetching ---
 
@@ -1038,6 +1052,32 @@ def get_current_user():
         'SELECT * FROM users WHERE session_id = ?', (session_id,)
     ).fetchone()
     return user
+
+
+def normalize_ranking_mode(value):
+    """F1-23: validate a ranking-mode value; None when invalid or missing."""
+    if value and str(value).strip().lower() in RANKING_MODES:
+        return str(value).strip().lower()
+    return None
+
+
+def effective_ranking_mode(user):
+    """F1-23: the ranking mode that applies to this user.
+
+    The preference is persisted on the user row (users.ranking_mode); NULL
+    means 'total' — the historical behavior.
+    """
+    mode = None
+    if user is not None and 'ranking_mode' in user.keys():
+        mode = normalize_ranking_mode(user['ranking_mode'])
+    return mode or 'total'
+
+
+def set_ranking_mode(db, session_id, mode):
+    """F1-23: persist the user's ranking-mode preference (committed)."""
+    db.execute('UPDATE users SET ranking_mode = ? WHERE session_id = ?',
+               (mode, session_id))
+    db.commit()
 
 
 def _normalize_email(email):
@@ -1827,6 +1867,27 @@ def predict(race_id):
 
     return render_template('predict.html', race=race, drivers=drivers, existing=existing)
 
+@app.route('/set-ranking-mode', methods=['POST'])
+def set_ranking_mode_route():
+    """F1-23: persist the current user's leaderboard ranking mode.
+
+    Form field `mode` must be 'total' or 'average'; anything else is a no-op.
+    Redirects to `next` (relative only, open-redirect guard) or /leaderboard.
+    """
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+
+    mode = normalize_ranking_mode(request.form.get('mode'))
+    if mode is not None:
+        set_ranking_mode(get_db(), user['session_id'], mode)
+
+    next_url = request.form.get('next') or ''
+    if next_url.startswith('/') and not next_url.startswith('//'):
+        return redirect(next_url)
+    return redirect(url_for('leaderboard'))
+
+
 @app.route('/leaderboard')
 def leaderboard():
     """Show leaderboard with all users and their scores.
@@ -1873,10 +1934,26 @@ def leaderboard():
         league_filter = "AND u.session_id IN (SELECT user_id FROM league_members WHERE league_id = ?)"
         league_args = (league['id'],)
 
-    # Get users with scores filtered by season
+    # F1-23 / BUD-153: ranking mode. A valid ?mode= sets AND persists the
+    # user's preference (it survives a reload with no mode param — the
+    # preference lives in users.ranking_mode, not the query string); without
+    # one, the persisted preference applies; NULL means 'total', the
+    # historical behavior. An invalid value is ignored.
+    mode = effective_ranking_mode(user)
+    mode_param = normalize_ranking_mode(request.args.get('mode'))
+    if mode_param is not None and user['ranking_mode'] != mode_param:
+        set_ranking_mode(db, user['session_id'], mode_param)
+        mode = mode_param
+
+    # Get users with scores filtered by season.
     # F1-111: exclude synthetic replay/persona users from public leaderboards.
+    # F1-23: races_in_window / avg_points use the exact same join (same
+    # season window) as total_score, so Average always covers exactly the
+    # races that Total sums.
     users = db.execute(f'''
-        SELECT u.*, COALESCE(SUM(s.points), 0) as total_score
+        SELECT u.*, COALESCE(SUM(s.points), 0) as total_score,
+               COUNT(s.race_id) as races_in_window,
+               AVG(s.points) as avg_points
         FROM users u
         LEFT JOIN scores s ON u.session_id = s.user_id
         LEFT JOIN races r ON s.race_id = r.id AND strftime('%Y', r.date) = ?
@@ -1884,6 +1961,38 @@ def leaderboard():
         GROUP BY u.session_id
         ORDER BY total_score DESC
     ''', (str(filter_year),) + league_args).fetchall()
+
+    # F1-23: in Average mode, only users with >= MIN_RANKED_AVERAGE_RACES
+    # scored races in this view's window are ranked; the rest are listed
+    # unranked beneath (they still appear normally in Total mode).
+    ranked_users, unranked_users = [], []
+    if mode == 'average':
+        qualified = [u for u in users if (u['races_in_window'] or 0) >= MIN_RANKED_AVERAGE_RACES]
+        qualified.sort(key=lambda u: (-(u['avg_points'] or 0),
+                                      -(u['total_score'] or 0),
+                                      (u['username'] or '').lower()))
+        for i, u in enumerate(qualified, 1):
+            d = dict(u)
+            d['rank'] = i
+            ranked_users.append(d)
+        unranked = [u for u in users if (u['races_in_window'] or 0) < MIN_RANKED_AVERAGE_RACES]
+        unranked.sort(key=lambda u: (-(u['total_score'] or 0),
+                                     (u['username'] or '').lower()))
+        unranked_users = [dict(u) for u in unranked]
+    else:
+        for i, u in enumerate(users, 1):
+            d = dict(u)
+            d['rank'] = i
+            ranked_users.append(d)
+
+    # Toggle links preserve the current season/league selection.
+    mode_qs = {}
+    if league is not None:
+        mode_qs['league'] = league['id']
+    if season_param not in ('current', ''):
+        mode_qs['season'] = season_param
+    mode_url_total = url_for('leaderboard', mode='total', **mode_qs)
+    mode_url_average = url_for('leaderboard', mode='average', **mode_qs)
 
     # Get races in the selected season
     races = db.execute('''
@@ -1906,11 +2015,19 @@ def leaderboard():
 
     return render_template('leaderboard.html',
                           users=users,
+                          ranked_users=ranked_users,
+                          unranked_users=unranked_users,
+                          matrix_users=(ranked_users + unranked_users
+                                        if mode == 'average' else ranked_users),
                           races=races,
                           score_matrix=score_matrix,
                           current_user=user,
                           season=filter_year,
                           league=league,
+                          mode=mode,
+                          mode_url_total=mode_url_total,
+                          mode_url_average=mode_url_average,
+                          min_average_races=MIN_RANKED_AVERAGE_RACES,
                           sc_pools=get_sc_pools(db),
                           sc_pool_start=SC_POOL_START)
 

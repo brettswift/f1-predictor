@@ -9,6 +9,14 @@
   color:var(--dimmer);border-radius:2px;text-decoration:none}
 .seasons a:hover{color:var(--tx);background:rgba(255,255,255,.04);text-decoration:none}
 .seasons a.on{color:var(--acc);background:rgba(176,140,255,.1);box-shadow:inset 0 0 0 1px rgba(176,140,255,.28)}
+.mode-toggle{display:flex;gap:0;margin-left:10px}
+.mode-toggle a{padding:4px 12px;font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--dimmer);text-decoration:none;border:1px solid var(--line)}
+.mode-toggle a:first-child{border-radius:3px 0 0 3px}
+.mode-toggle a:last-child{border-radius:0 3px 3px 0}
+.mode-toggle a.on{color:var(--acc);background:rgba(176,140,255,.1);border-color:rgba(176,140,255,.28)}
+.unranked-header{font-family:var(--mono);font-size:10px;letter-spacing:.08em;color:var(--dim);
+  text-transform:uppercase;padding:12px 0 4px;border-top:1px solid var(--line)}
 .who{display:flex;align-items:center;gap:9px}
 .pfp{width:22px;height:22px;border-radius:50%;flex:0 0 auto;display:grid;place-items:center;font-size:12px;
   background:rgba(255,255,255,.06);border:1px solid var(--line)}
@@ -30,6 +38,10 @@
     <h2>Standings</h2>
     {% if league %}<span class="tag acc">{{ league['emoji_or_color'] }} {{ league['name'] }}</span>{% endif %}
     {% if season %}<span class="tag">Season {{ season }}</span>{% endif %}
+    <div class="mode-toggle">
+      <a href="{{ mode_url_total }}" class="{% if mode == 'total' %}on{% endif %}">Total</a>
+      <a href="{{ mode_url_average }}" class="{% if mode == 'average' %}on{% endif %}">Avg</a>
+    </div>
     <div class="rule"></div>
     <div class="seasons">
       <a href="?season=current" class="{% if not league and season %}on{% endif %}">Current</a>
@@ -46,11 +58,15 @@
       <th style="width:100px">Form</th>
       <th style="width:78px;text-align:right">Podium</th>
       <th style="width:140px">Safety-car pool</th>
+      {% if mode == 'average' %}
+      <th style="width:76px;text-align:right">Avg</th>
+      {% else %}
       <th style="width:76px;text-align:right">Total</th>
+      {% endif %}
     </tr></thead>
     <tbody>
       {% set sc_peak = (sc_pools.values()|list + [sc_pool_start])|max %}
-      {% for u in users %}
+      {% for u in ranked_users %}
       {% set recent = [] %}
       {% for race in races[-5:] %}
         {% set v = score_matrix[u['session_id']][race['id']] %}
@@ -58,7 +74,7 @@
       {% endfor %}
       {% set peak = recent|max if recent else 0 %}
       <tr {% if u['session_id'] == current_user['session_id'] %}class="me"{% endif %}>
-        <td><span class="pos-n">{{ loop.index }}</span></td>
+        <td><span class="pos-n">{{ u['rank'] }}</span></td>
         <td>
           <span class="who">
             <span class="pfp">{{ avatar_for(u) }}</span>
@@ -79,11 +95,38 @@
         <td style="text-align:right"><span class="num" style="font-size:12px;color:var(--dim)">{{ u['total_score'] }}</span></td>
         <td><span class="scmeter"><span class="m"><i style="width:{{ ((pool / sc_peak * 100)|round|int) if sc_peak else 0 }}%"></i></span>
           <span class="num" style="font-size:11px;color:var(--warn)">{{ pool }}</span></span></td>
+        {% if mode == 'average' %}
+        <td style="text-align:right"><span class="pts">{{ (u['avg_points'] or 0)|round(1) }}</span></td>
+        {% else %}
         <td style="text-align:right"><span class="pts">{{ u['total_score'] + pool }}</span></td>
+        {% endif %}
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  {% if mode == 'average' and unranked_users %}
+  <div class="unranked-header">Below threshold — fewer than {{ min_average_races }} scored races in this window</div>
+  <table>
+    <tbody>
+      {% for u in unranked_users %}
+      <tr {% if u['session_id'] == current_user['session_id'] %}class="me"{% endif %} style="opacity:.5">
+        <td style="width:56px"><span class="pos-n">—</span></td>
+        <td>
+          <span class="who">
+            <span class="pfp">{{ avatar_for(u) }}</span>
+            <span>{{ display_name_for(u) }}</span>
+            {% if u['session_id'] == current_user['session_id'] %}<span class="lbl" style="color:var(--acc)">you</span>{% endif %}
+          </span>
+        </td>
+        <td style="width:100px"></td>
+        <td style="width:78px;text-align:right"><span class="num" style="font-size:12px;color:var(--dim)">{{ u['total_score'] }}</span></td>
+        <td style="width:140px"></td>
+        <td style="width:76px;text-align:right"><span class="lbl" style="font-size:10px;color:var(--dim)">{{ u['races_in_window'] or 0 }} race{% if (u['races_in_window'] or 0) != 1 %}s{% endif %}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
   </div>
 </section>
 
@@ -95,17 +138,21 @@
       <thead><tr>
         <th>Player</th>
         {% for race in races %}<th title="{{ race['name'] }}">R{{ race['round'] }}</th>{% endfor %}
-        <th>Total</th>
+        {% if mode == 'average' %}<th>Avg</th>{% else %}<th>Total</th>{% endif %}
       </tr></thead>
       <tbody>
-        {% for u in users %}
+        {% for u in matrix_users %}
         <tr {% if u['session_id'] == current_user['session_id'] %}class="me"{% endif %}>
           <td>{{ display_name_for(u) }}</td>
           {% for race in races %}
           {% set v = score_matrix[u['session_id']][race['id']] %}
           <td class="{% if not (v is number and v) %}zero{% endif %}">{{ v }}</td>
           {% endfor %}
+          {% if mode == 'average' %}
+          <td><span class="pts">{{ (u['avg_points'] or 0)|round(1) }}</span></td>
+          {% else %}
           <td><span class="pts">{{ u['total_score'] }}</span></td>
+          {% endif %}
         </tr>
         {% endfor %}
       </tbody>
