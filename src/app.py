@@ -19,7 +19,7 @@ from functools import wraps
 from urllib.parse import urlencode
 
 import click
-from flask import Flask, render_template, request, redirect, url_for, session, g, flash, jsonify
+from flask import Flask, render_template, request, redirect, url_for, session, g, flash, jsonify, abort
 from itsdangerous import URLSafeTimedSerializer
 
 import openf1
@@ -2150,6 +2150,117 @@ def leaderboard():
                           min_average_races=MIN_RANKED_AVERAGE_RACES,
                           sc_pools=get_sc_pools(db),
                           sc_pool_start=SC_POOL_START)
+
+
+def _h2h_user_matrix(db, session_id, races):
+    """Per-race points for one user across `races`.
+
+    F1-27 / BUD-157: identical lookup pattern to the leaderboard's
+    score_matrix construction (src/app.py, /leaderboard route) — a single
+    `scores` row fetch per race, no separate aggregation — so a given
+    race's number here can never drift from what the leaderboard shows.
+    """
+    matrix = {}
+    for race in races:
+        score = db.execute(
+            'SELECT points FROM scores WHERE user_id = ? AND race_id = ?',
+            (session_id, race['id'])
+        ).fetchone()
+        matrix[race['id']] = score['points'] if score else '-'
+    return matrix
+
+
+def _h2h_summary(matrix):
+    """Total / average / races-scored, derived from a per-race matrix only —
+    no query beyond the per-race lookups already used to build it."""
+    scored = [v for v in matrix.values() if isinstance(v, int)]
+    races_scored = len(scored)
+    total = sum(scored)
+    avg = (total / races_scored) if races_scored else 0
+    return {'total': total, 'avg': avg, 'races_scored': races_scored}
+
+
+@app.route('/h2h')
+def head_to_head_picker():
+    """F1-27 / BUD-157: simple discovery entry point for the head-to-head
+    view. The AC only requires the URL-addressable comparison itself to
+    work, not a particular entry point — this is a small username-picker
+    form that redirects to the canonical /h2h/<user_a>/<user_b> URL.
+    """
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+
+    a = request.args.get('a', '').strip()
+    b = request.args.get('b', '').strip()
+    if a and b:
+        return redirect(url_for('head_to_head', user_a=a, user_b=b))
+
+    db = get_db()
+    users = db.execute(
+        'SELECT username FROM users WHERE is_synthetic = 0 ORDER BY username COLLATE NOCASE'
+    ).fetchall()
+    return render_template('h2h_picker.html', users=users)
+
+
+@app.route('/h2h/<user_a>/<user_b>')
+def head_to_head(user_a, user_b):
+    """F1-27 / BUD-157: head-to-head season comparison for any two users.
+
+    Pure GET, no prior navigation state required — a bare request for this
+    URL returns the full comparison. Reads directly off the shared global
+    `scores` table (like /leaderboard), so it works for a pair who have
+    never shared a league; there is no league_members involvement at all.
+    """
+    user = get_current_user()
+    if not user:
+        return redirect(url_for('index'))
+
+    db = get_db()
+    row_a = db.execute('SELECT * FROM users WHERE username = ?', (user_a,)).fetchone()
+    row_b = db.execute('SELECT * FROM users WHERE username = ?', (user_b,)).fetchone()
+    if row_a is None or row_b is None:
+        abort(404)
+
+    season = app.config['F1_SEASON']
+    races = db.execute('''
+        SELECT r.* FROM races r
+        WHERE r.status = 'completed' AND strftime('%Y', r.date) = ?
+        ORDER BY r.date ASC
+    ''', (str(season),)).fetchall()
+
+    matrix_a = _h2h_user_matrix(db, row_a['session_id'], races)
+    matrix_b = _h2h_user_matrix(db, row_b['session_id'], races)
+    stats_a = _h2h_summary(matrix_a)
+    stats_b = _h2h_summary(matrix_b)
+
+    # Races each out-scored the other — only counted where both have a
+    # scored (numeric) result for that race; a race missing for either
+    # side is neither a win nor a loss.
+    a_wins = b_wins = ties = 0
+    for race in races:
+        va, vb = matrix_a[race['id']], matrix_b[race['id']]
+        if isinstance(va, int) and isinstance(vb, int):
+            if va > vb:
+                a_wins += 1
+            elif vb > va:
+                b_wins += 1
+            else:
+                ties += 1
+
+    return render_template('h2h.html',
+                          user_a=row_a,
+                          user_b=row_b,
+                          races=races,
+                          matrix_a=matrix_a,
+                          matrix_b=matrix_b,
+                          stats_a=stats_a,
+                          stats_b=stats_b,
+                          a_wins=a_wins,
+                          b_wins=b_wins,
+                          ties=ties,
+                          season=season)
+
 
 @app.route('/live')
 def live():
