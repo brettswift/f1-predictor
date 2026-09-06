@@ -36,7 +36,7 @@
         <tr>
           <td>{{ member['user_id'] }}</td>
           <td><span class="tag {% if member['is_admin'] %}acc{% endif %}">{{ 'Admin' if member['is_admin'] else 'Member' }}</span></td>
-          <td><span class="num" style="font-size:11px;color:var(--dim)">{{ member['joined_at'] }}</span></td>
+          <td><span class="tag" title="{{ member['joined_at'] }}">Round {{ member['joined_round'] }}</span></td>
           {% if is_league_admin %}
           <td>
             {% if member['user_id'] != current_user_id %}
