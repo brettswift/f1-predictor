@@ -2,86 +2,106 @@
 
 {% block title %}Season Stats - F1 Predictor{% endblock %}
 
+{% block extra_css %}
+<style>
+.who{display:flex;align-items:center;gap:9px;margin-left:auto}
+.pfp{width:22px;height:22px;border-radius:50%;flex:0 0 auto;display:grid;place-items:center;font-size:12px;
+  background:rgba(255,255,255,.06);border:1px solid var(--line)}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.tile{border:1px solid var(--line);border-radius:2px;padding:16px 16px 13px;
+  background:linear-gradient(180deg,var(--panel2),#0D1017)}
+.tile .val{font-family:var(--cond);font-weight:700;font-size:34px;line-height:1.05;
+  font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
+.tile .cap{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--dimmer);margin-top:7px}
+.tile .sub{font-family:var(--mono);font-size:9.5px;color:var(--dimmer);margin-top:4px;letter-spacing:.04em}
+.tile.acc .val{color:var(--acc)}
+.rank1{color:var(--p1)} .rank2{color:var(--p2)} .rank3{color:var(--p3)}
+</style>
+{% endblock %}
+
 {% block content %}
-<div class="card">
-    <div style="display: flex; gap: 15px; align-items: center; margin-bottom: 10px;">
-        <span style="font-size: 40px;">{{ avatar_for(user) }}</span>
-        <div>
-            <h2 style="margin-bottom: 5px;">{{ display_name_for(user) }}</h2>
-            <p style="margin-bottom: 0; opacity: 0.7;">Season {{ stats['season'] }} stats</p>
-        </div>
+<section class="panel">
+  <div class="phead">
+    <h2>Season Stats</h2>
+    <span class="tag acc">Season {{ stats['season'] }}</span>
+    <div class="rule"></div>
+    <span class="who">
+      <span class="pfp">{{ avatar_for(user) }}</span>
+      <span>{{ display_name_for(user) }}</span>
+    </span>
+  </div>
+  <div class="pbody">
+    <div class="tiles">
+      <div class="tile">
+        <div class="val num">{{ stats['total_score'] }}</div>
+        <div class="cap">Total Points</div>
+      </div>
+      <div class="tile acc">
+        <div class="val num">{{ stats['overall_accuracy_pct'] }}%</div>
+        <div class="cap">Accuracy</div>
+        <div class="sub">points / max possible (20 per race)</div>
+      </div>
+      <div class="tile">
+        <div class="val num">{{ stats['races_scored'] }}</div>
+        <div class="cap">Races Scored</div>
+      </div>
+      {% if stats['best_race'] %}
+      <div class="tile">
+        <div class="val num">{{ stats['best_race']['points'] }}</div>
+        <div class="cap">Best Race</div>
+        <div class="sub">R{{ stats['best_race']['round'] }} &middot; {{ stats['best_race']['name'] }}</div>
+      </div>
+      {% endif %}
     </div>
-</div>
+  </div>
+</section>
 
-<div class="card">
-    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 20px; text-align: center;">
-        <div style="background: rgba(255,255,255,0.05); border-radius: 10px; padding: 20px;">
-            <div style="font-size: 32px; font-weight: bold; color: #e10600;">{{ stats['total_score'] }}</div>
-            <div style="font-size: 13px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.5px;">Total Points</div>
-        </div>
-        <div style="background: rgba(255,255,255,0.05); border-radius: 10px; padding: 20px;">
-            <div style="font-size: 32px; font-weight: bold; color: #e10600;">{{ stats['overall_accuracy_pct'] }}%</div>
-            <div style="font-size: 13px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.5px;">Accuracy</div>
-            <div style="font-size: 11px; opacity: 0.5; margin-top: 4px;">points / max possible</div>
-        </div>
-        <div style="background: rgba(255,255,255,0.05); border-radius: 10px; padding: 20px;">
-            <div style="font-size: 32px; font-weight: bold; color: #e10600;">{{ stats['races_scored'] }}</div>
-            <div style="font-size: 13px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.5px;">Races Scored</div>
-        </div>
-        {% if stats['best_race'] %}
-        <div style="background: rgba(255,255,255,0.05); border-radius: 10px; padding: 20px;">
-            <div style="font-size: 32px; font-weight: bold; color: #e10600;">{{ stats['best_race']['points'] }}</div>
-            <div style="font-size: 13px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.5px;">Best Race</div>
-            <div style="font-size: 11px; opacity: 0.8; margin-top: 4px;">R{{ stats['best_race']['round'] }} {{ stats['best_race']['name'] }}</div>
-        </div>
-        {% endif %}
-    </div>
-</div>
-
-{% if stats['rank_history'] %}
-<div class="card">
-    <h3>📈 Global Rank History</h3>
-    <p style="opacity: 0.7;">Your position after each completed race, using the same scores that power the global leaderboard.</p>
-    <div class="table-scroll">
-        <table>
-            <thead>
-                <tr>
-                    <th>Round</th>
-                    <th>Race</th>
-                    <th style="text-align: right;">Race Pts</th>
-                    <th style="text-align: right;">Total</th>
-                    <th style="text-align: center;">Global Rank</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for row in stats['rank_history'] %}
-                <tr>
-                    <td>{{ row['round'] }}</td>
-                    <td>{{ row['name'] }}</td>
-                    <td style="text-align: right;">{{ row['points'] }}</td>
-                    <td style="text-align: right;"><span class="score-badge">{{ row['cumulative_points'] }}</span></td>
-                    <td style="text-align: center;">
-                        {% if row['rank'] == 1 %}🥇
-                        {% elif row['rank'] == 2 %}🥈
-                        {% elif row['rank'] == 3 %}🥉
-                        {% else %}{{ row['rank'] }}{% endif %}
-                        <span style="font-size: 12px; opacity: 0.6;">/ {{ row['total_users'] }}</span>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
-</div>
-{% else %}
-<div class="card">
-    <h3>📈 Global Rank History</h3>
+<section class="panel">
+  <div class="phead">
+    <h2>Global Rank History</h2>
+    <div class="rule"></div>
+    <span class="lbl">same scores as the global standings &middot; podium points only</span>
+  </div>
+  {% if stats['rank_history'] %}
+  <div class="table-scroll">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:64px">Round</th>
+          <th>Race</th>
+          <th style="width:86px;text-align:right">Race Pts</th>
+          <th style="width:86px;text-align:right">Total</th>
+          <th style="width:110px;text-align:center">Global Rank</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in stats['rank_history'] %}
+        <tr>
+          <td><span class="lbl">R{{ row['round'] }}</span></td>
+          <td>{{ row['name'] }}</td>
+          <td style="text-align:right"><span class="num" style="font-size:12px;color:var(--dim)">{{ row['points'] }}</span></td>
+          <td style="text-align:right"><span class="pts">{{ row['cumulative_points'] }}</span></td>
+          <td style="text-align:center">
+            <span class="pos-n {% if row['rank'] == 1 %}rank1{% elif row['rank'] == 2 %}rank2{% elif row['rank'] == 3 %}rank3{% endif %}">{{ row['rank'] }}</span>
+            <span class="lbl">/ {{ row['total_users'] }}</span>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="pbody">
     <p>No completed races yet this season. Once results roll in, your race-by-race global rank will appear here.</p>
-</div>
-{% endif %}
+  </div>
+  {% endif %}
+</section>
 
-<div class="card" style="text-align: center;">
-    <a href="{{ url_for('leaderboard') }}" class="btn">View Global Leaderboard</a>
-    <a href="{{ url_for('profile') }}" class="btn btn-secondary">Edit Profile</a>
-</div>
+<section class="panel">
+  <div class="pbody btnrow">
+    <a href="{{ url_for('leaderboard') }}" class="btn"><span>View Global Leaderboard</span></a>
+    <a href="{{ url_for('profile') }}" class="btn btn-secondary"><span>Edit Profile</span></a>
+  </div>
+</section>
 {% endblock %}
