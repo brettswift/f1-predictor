@@ -62,6 +62,7 @@
       <th style="width:100px">Form</th>
       <th style="width:78px;text-align:right">Podium</th>
       <th style="width:140px">Safety-car pool</th>
+      {% if league %}<th style="width:76px">Joined</th>{% endif %}
       {% if mode == 'average' %}
       <th style="width:76px;text-align:right">Avg</th>
       {% else %}
@@ -99,6 +100,7 @@
         <td style="text-align:right"><span class="num" style="font-size:12px;color:var(--dim)">{{ u['total_score'] }}</span></td>
         <td><span class="scmeter"><span class="m"><i style="width:{{ ((pool / sc_peak * 100)|round|int) if sc_peak else 0 }}%"></i></span>
           <span class="num" style="font-size:11px;color:var(--warn)">{{ pool }}</span></span></td>
+        {% if league %}<td><span class="lbl" style="font-size:10px;color:var(--dim)">R{{ u['joined_round'] }}</span></td>{% endif %}
         {% if mode == 'average' %}
         <td style="text-align:right"><span class="pts">{{ (u['avg_points'] or 0)|round(1) }}</span></td>
         {% else %}
@@ -125,6 +127,7 @@
         <td style="width:100px"></td>
         <td style="width:78px;text-align:right"><span class="num" style="font-size:12px;color:var(--dim)">{{ u['total_score'] }}</span></td>
         <td style="width:140px"></td>
+        {% if league %}<td style="width:76px"><span class="lbl" style="font-size:10px;color:var(--dim)">R{{ u['joined_round'] }}</span></td>{% endif %}
         <td style="width:76px;text-align:right"><span class="lbl" style="font-size:10px;color:var(--dim)">{{ u['races_in_window'] or 0 }} race{% if (u['races_in_window'] or 0) != 1 %}s{% endif %}</span></td>
       </tr>
       {% endfor %}

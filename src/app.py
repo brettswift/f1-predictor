@@ -1418,6 +1418,37 @@ def get_league_members(db, league_id):
     ).fetchall()
 
 
+def get_member_joined_round(db, joined_at):
+    """Round number for a `league_members.joined_at` timestamp (F1-28 / BUD-158).
+
+    A pure date-bracket read against `races`: the first race whose `date` is
+    on/after `joined_at`. Deliberately not the stored `joined_at_round`
+    column (set once at insert time from the "current or next open race"
+    heuristic in `_current_or_next_round`, which can drift from this
+    display-time computation) and not inferred from earliest-prediction.
+    A member who joined after every scheduled race falls back to the last
+    race's round rather than returning nothing.
+    """
+    row = db.execute(
+        'SELECT round FROM races WHERE date >= ? ORDER BY date ASC LIMIT 1',
+        (joined_at,)
+    ).fetchone()
+    if row:
+        return row['round']
+    row = db.execute('SELECT round FROM races ORDER BY date DESC LIMIT 1').fetchone()
+    return row['round'] if row else None
+
+
+def get_league_members_with_joined_round(db, league_id):
+    """`get_league_members` rows plus each member's `joined_round` (F1-28)."""
+    members = []
+    for m in get_league_members(db, league_id):
+        d = dict(m)
+        d['joined_round'] = get_member_joined_round(db, m['joined_at'])
+        members.append(d)
+    return members
+
+
 def get_user_leagues(db, user_id):
     """Leagues a user belongs to, most recently created first."""
     return db.execute(
@@ -2083,6 +2114,18 @@ def leaderboard():
             d['rank'] = i
             ranked_users.append(d)
 
+    # F1-28 / BUD-158: join-round context in the league table - each member's
+    # `joined_round` from `league_members.joined_at` (not the stored
+    # `joined_at_round` heuristic), so a late joiner is visibly explained
+    # right on the standings table rather than a separate members-only view.
+    if league is not None:
+        joined_rounds = {
+            m['user_id']: m['joined_round']
+            for m in get_league_members_with_joined_round(db, league['id'])
+        }
+        for d in ranked_users + unranked_users:
+            d['joined_round'] = joined_rounds.get(d['session_id'])
+
     # Toggle links preserve the current season/league selection.
     mode_qs = {}
     if league is not None:
@@ -2426,7 +2469,7 @@ def league_detail(league_id):
         flash('League not found', 'error')
         return redirect(url_for('leagues'))
 
-    members = get_league_members(db, league_id)
+    members = get_league_members_with_joined_round(db, league_id)
     return render_template('league_detail.html',
                           league=league,
                           members=members,
