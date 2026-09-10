@@ -1707,17 +1707,32 @@ def get_sc_pools(db):
 # Read-only aggregates that make the desk useful even when you have not voted.
 
 def get_pick_distribution(db, race_id, limit=8):
-    """Crowd mood: share of entrants backing each driver for the podium.
+    """Crowd picks: how the field's own prediction cards split over each driver.
 
-    Real sentiment from the game itself rather than an external feed - the
-    numbers are the field's own picks for this race.
+    This is prediction data, not external sentiment. Every number here is derived
+    from submitted cards for this race:
+
+      backed_pct  share of cards naming the driver anywhere on the podium
+      win_pct     share of cards naming the driver to win (a subset of backed)
+      passed_pct  share of cards that left the driver off the podium entirely
+
+    ``backed_pct + passed_pct`` is 100 by construction, which is what lets The
+    Wire draw a two-sided bar without inventing a sentiment feed. Passing on a
+    driver is not the same as negative sentiment, and the template says so.
+
+    The ``status`` field distinguishes three genuinely different situations that
+    used to collapse into one empty result:
+
+      ok           real rows to draw
+      empty        the query worked and nobody has submitted a card yet
+      unavailable  the query failed; the crowd is unknown, not empty
     """
     try:
         total = db.execute(
             'SELECT COUNT(*) AS c FROM predictions WHERE race_id = ?', (race_id,)
         ).fetchone()['c']
         if not total:
-            return {'total': 0, 'rows': []}
+            return {'total': 0, 'rows': [], 'status': 'empty'}
         rows = db.execute('''
             SELECT d.id AS id, d.name AS name, d.code AS code,
                    SUM(CASE WHEN p.p1_driver_id = d.id THEN 1 ELSE 0 END) AS win_picks,
@@ -1731,16 +1746,23 @@ def get_pick_distribution(db, race_id, limit=8):
             LIMIT ?
         ''', (race_id, limit)).fetchall()
     except Exception:
-        return {'total': 0, 'rows': []}
-    return {
-        'total': total,
-        'rows': [{
+        app.logger.exception(
+            'get_pick_distribution failed for race_id=%s', race_id
+        )
+        return {'total': 0, 'rows': [], 'status': 'unavailable'}
+
+    out = []
+    for r in rows:
+        backed_pct = round(r['podium_picks'] * 100.0 / total)
+        out.append({
             'name': r['name'],
             'code': r['code'] or (r['name'] or '').split()[-1][:3].upper(),
             'win_pct': round(r['win_picks'] * 100.0 / total),
-            'podium_pct': round(r['podium_picks'] * 100.0 / total),
-        } for r in rows],
-    }
+            'podium_pct': backed_pct,
+            'backed_pct': backed_pct,
+            'passed_pct': 100 - backed_pct,
+        })
+    return {'total': total, 'rows': out, 'status': 'ok'}
 
 
 def get_safety_car_stats(db):
