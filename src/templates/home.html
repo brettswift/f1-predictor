@@ -90,19 +90,37 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
 .legend{display:flex;gap:14px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
 .legend span{display:flex;align-items:center;gap:5px}
 .legend i{width:8px;height:8px;border-radius:2px;display:block}
-.dv{display:grid;grid-template-columns:40px 1fr 42px;align-items:center;gap:10px;padding:5px 0}
-.dv .c{font-family:var(--cond);font-weight:600;font-size:15px;letter-spacing:.04em}
-.dv .g{position:relative;height:12px;background:#151925;border-radius:2px;overflow:hidden}
-.dv .g b{position:absolute;left:0;top:0;bottom:0;display:block;border-radius:2px}
-.dv .g b.pod{background:linear-gradient(90deg,rgba(38,224,138,.30),rgba(38,224,138,.55))}
-.dv .g b.win{background:var(--acc);height:6px;top:3px}
-.dv .v{font-family:var(--mono);font-size:9.5px;color:var(--dim);text-align:right}
-.wiregrid{display:grid;grid-template-columns:1.35fr 1fr;gap:0}
-.wiregrid>div{padding:16px}
+/* Two-sided crowd-pick chart, ported from the Mock B Wire geometry.
+   Left of the midpoint = cards that left the driver off the podium,
+   right = cards backing them, with the win share overlaid on the right.
+   Each half is a 0-100% axis, so widths are halved to share one track. */
+.dv{display:grid;grid-template-columns:44px minmax(0,1fr) 52px;align-items:center;
+  gap:10px;padding:8px 0;min-height:40px;border-bottom:1px solid rgba(255,255,255,.04)}
+.dv .c{font-family:var(--cond);font-weight:600;font-size:17px;letter-spacing:.04em}
+.dv .g{position:relative;height:16px;min-width:0}
+.dv .g::before{content:'';position:absolute;left:50%;top:-2px;bottom:-2px;
+  width:1px;background:var(--line2)}
+.dv .g b{position:absolute;top:3px;height:10px;display:block;border-radius:1px}
+.dv .g b.pass{right:50%;background:var(--neg);opacity:.75}
+.dv .g b.back{left:50%;background:var(--pos)}
+.dv .g b.win{left:50%;background:var(--acc);height:4px;top:6px}
+.dv .v{font-family:var(--mono);font-size:var(--text-meta);color:var(--tx);text-align:right}
+.dvscale{display:flex;justify-content:space-between;font-family:var(--mono);
+  font-size:var(--text-meta);color:var(--dimmer);padding:6px 0;
+  margin-left:54px;margin-right:62px}
+.dvscale .mid{opacity:.8}
+.dv-detail{grid-column:2/-1;font-family:var(--mono);font-size:var(--text-meta);
+  color:var(--dim);padding-top:4px}
+.wire-intro{font-size:var(--text-label);line-height:1.6;color:var(--dim);margin:0 0 14px}
+.wire-foot{font-size:var(--text-label);line-height:1.6;color:var(--dim);margin-top:12px}
+.wire-state{margin:0;font-size:var(--text-label);line-height:1.6}
+.wire-jump{display:inline-block;padding:12px 0;font-size:var(--text-label)}
+.wiregrid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:0}
+.wiregrid>div{padding:24px;min-width:0}
 .wiregrid>div+div{border-left:1px solid var(--line)}
 .scbar{height:6px;border-radius:4px;background:#1C2130;overflow:hidden;margin:10px 0 8px}
 .scbar i{display:block;height:100%;background:linear-gradient(90deg,rgba(255,180,61,.45),var(--warn));border-radius:4px}
-.note{font-size:11.5px;line-height:1.6;margin-top:12px;padding:10px 12px;border:1px solid rgba(176,140,255,.24);
+.note{font-size:var(--text-label);line-height:1.6;margin-top:12px;padding:12px 14px;border:1px solid rgba(176,140,255,.24);
   border-radius:2px;background:rgba(176,140,255,.055);color:#C7CBDA}
 .note b{color:var(--acc);font-weight:600}
 
@@ -115,12 +133,24 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
 .scmeter .m i{display:block;height:100%;border-radius:3px;background:linear-gradient(90deg,rgba(255,180,61,.4),var(--warn))}
 .lsel{margin-left:auto;display:flex;align-items:center;gap:8px}
 .lsel select{width:auto;padding:6px 30px 6px 10px;font-size:11px}
+/* Grid/flex children need explicit min-width:0 or long content forces the
+   track wider than the phone viewport. This is the actual clipping fix. */
+.stripgrid>*,.slot,.votefoot>*{min-width:0}
+.striptop h1{overflow-wrap:anywhere}
+.slot .ghost,.cdu .u,.dchip .no{font-size:var(--text-meta);letter-spacing:.04em}
+.scq p,.scnote{font-size:var(--text-label);line-height:1.6}
 @media (max-width:860px){
-  .scblock{grid-template-columns:1fr;gap:14px}
-  .wiregrid{grid-template-columns:1fr}
+  .scblock{grid-template-columns:minmax(0,1fr);gap:14px}
+  .wiregrid{grid-template-columns:minmax(0,1fr)}
+  .wiregrid>div{padding:16px}
   .wiregrid>div+div{border-left:0;border-top:1px solid var(--line)}
   .snap{grid-template-columns:1fr 1fr}
-  .slots{gap:7px}.slot .code{font-size:22px}.slot .nm{display:none}
+  .slots{gap:7px;grid-template-columns:repeat(3,minmax(0,1fr))}
+  .slot .code{font-size:22px}.slot .nm{display:none}
+  .slot .in{padding:10px 8px}
+  .dvscale{margin-left:54px;margin-right:62px}
+  .lsel{flex-wrap:wrap;max-width:100%;margin-left:0}
+  .lsel select{max-width:100%}
 }
 </style>
 {% endblock %}
@@ -262,37 +292,64 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
   {% endif %}
 </section>
 
+<a class="wire-jump" href="#the-wire">Explore The Wire &darr;</a>
 <!-- ══ 2. THE WIRE ══ -->
-<section class="panel">
+<section class="panel" id="the-wire" tabindex="-1" aria-labelledby="wire-title">
   <div class="phead">
-    <h2>The Wire</h2>
+    <h2 id="wire-title">The Wire</h2>
     <span class="tag acc">{{ crowd['total'] }} cards in</span>
     <div class="rule"></div>
     <span class="lbl">Where the field is leaning</span>
   </div>
   <div class="wiregrid">
     <div>
-      <div class="lbl" style="margin-bottom:10px">Crowd mood &mdash; podium picks</div>
-      {% if crowd['rows'] %}
+      <div class="lbl" style="margin-bottom:4px">Crowd picks &mdash; this race</div>
+      {% if crowd['status'] == 'ok' %}
+      <p class="wire-intro">
+        Each bar splits this race's {{ crowd['total'] }} submitted cards: how many put the driver
+        on the podium, and how many left them off. This is prediction data from the game itself &mdash;
+        passing on a driver is not the same as negative sentiment, and no external posts are scanned.
+      </p>
       <div class="legend">
-        <span><i style="background:rgba(38,224,138,.5)"></i><span class="lbl">On the podium</span></span>
-        <span><i style="background:var(--acc)"></i><span class="lbl">To win</span></span>
+        <span><i style="background:var(--neg)"></i><span class="lbl">Left off</span></span>
+        <span><i style="background:var(--pos)"></i><span class="lbl">Backed for podium</span></span>
+        <span><i style="background:var(--acc)"></i><span class="lbl">Picked to win</span></span>
+      </div>
+      <div class="dvscale" aria-hidden="true">
+        <span>100%</span><span class="mid">0</span><span>100%</span>
       </div>
       {% for d in crowd['rows'] %}
-      <div class="dv">
-        <span class="c">{{ d['code'] }}</span>
-        <span class="g" title="{{ d['name'] }}"><b class="pod" style="width:{{ d['podium_pct'] }}%"></b><b class="win" style="width:{{ d['win_pct'] }}%"></b></span>
-        <span class="v">{{ d['podium_pct'] }}%</span>
+      <div class="dv" role="img"
+           aria-label="{{ d['name'] }}: backed for the podium on {{ d['backed_pct'] }} percent of cards, left off {{ d['passed_pct'] }} percent, picked to win {{ d['win_pct'] }} percent.">
+        <span class="c" aria-hidden="true">{{ d['code'] }}</span>
+        <span class="g" aria-hidden="true">
+          <b class="pass" style="width:{{ d['passed_pct'] / 2 }}%"></b>
+          <b class="back" style="width:{{ d['backed_pct'] / 2 }}%"></b>
+          <b class="win" style="width:{{ d['win_pct'] / 2 }}%"></b>
+        </span>
+        <span class="v" aria-hidden="true">{{ d['backed_pct'] }}%</span>
+        <span class="dv-detail" aria-hidden="true">
+          {{ d['name'] }} &middot; off {{ d['passed_pct'] }}% &middot; podium {{ d['backed_pct'] }}% &middot; win {{ d['win_pct'] }}%
+        </span>
       </div>
       {% endfor %}
+      <p class="wire-foot">
+        Share of {{ crowd['total'] }} cards. Win picks are a subset of podium picks, so driver
+        percentages do not sum to 100%.
+      </p>
       {% if crowd['rows']|length > 1 %}
       <div class="note">
-        <b>{{ crowd['rows'][0]['code'] }}</b> is the consensus call at <b>{{ crowd['rows'][0]['podium_pct'] }}%</b> of cards.
+        <b>{{ crowd['rows'][0]['code'] }}</b> is the consensus call at <b>{{ crowd['rows'][0]['backed_pct'] }}%</b> of cards.
         Backing the field pays the same as the field &mdash; the points are in the driver nobody else has.
       </div>
       {% endif %}
+      {% elif crowd['status'] == 'unavailable' %}
+      <p class="wire-state" role="status">
+        Crowd picks are unavailable right now &mdash; we could not read the prediction data.
+        This is not an empty grid; check back shortly.
+      </p>
       {% else %}
-      <p style="margin:0">No cards in for this race yet. Vote first and you set the mood.</p>
+      <p class="wire-state">No cards in for this race yet. Vote first and you set the mood.</p>
       {% endif %}
     </div>
     <div>
