@@ -2,6 +2,34 @@
 
 End-to-end workflow for developing, testing, and promoting f1-predictor changes.
 
+> **The dev environment is retired. Do not use it.**
+>
+> `f1-dev` and https://f1.home.brettswift.com are **abandoned**. The dev site runs
+> an obsolete, completely different design, and its ArgoCD PostSync auto-deploy
+> does not reliably fire — a merge to `f1-dev` can leave a stale pod serving old
+> bytes for days, which reads as "my change didn't work" when the change was fine.
+>
+> **Ship to prod instead:** branch from `main`, PR into `main`, verify at
+> https://f1.brettswift.com. Ignore every "PR targeting f1-dev" instruction in
+> the steps below; they are kept only to explain the retired pipeline.
+>
+> **The deploy branch is `main`, not `live`.** `.github/workflows/build-f1-predictor-prod.yml`
+> triggers on pushes to `main`. The `live` branch is stale — it predates the race
+> desk rebuild and is not what deploys f1.brettswift.com. The "Prod | live" row
+> below and the same claim in README.md are both wrong; trust the workflow file.
+>
+> After merging to `live`, **verify the rollout actually happened** — do not
+> assume it did:
+>
+> ```bash
+> export KUBECONFIG=~/.kube/config-nas
+> kubectl get pods -n f1-predictor          # pod AGE should be seconds, not days
+> kubectl rollout restart deploy/f1-predictor -n f1-predictor   # if it did not roll
+> ```
+>
+> Confirm the served HTML actually changed (grep for a marker from your diff)
+> rather than trusting an HTTP 200.
+
 ## Overview
 
 ```mermaid
@@ -24,10 +52,11 @@ flowchart TB
   end
 ```
 
-| Environment | Branch | URL | ArgoCD App |
-|-------------|--------|-----|------------|
-| Dev | f1-dev | https://f1.home.brettswift.com | f1-predictor-dev |
-| Prod | live | https://f1.brettswift.com | f1-predictor |
+| Environment | Branch | URL | ArgoCD App | Status |
+|-------------|--------|-----|------------|--------|
+| Dev | f1-dev | https://f1.home.brettswift.com | f1-predictor-dev | **RETIRED — do not use** |
+| Prod | `main` | https://f1.brettswift.com | f1-predictor | Active |
+| ~~Prod~~ | ~~live~~ | — | — | Stale branch, not deployed |
 
 ## Workflow Steps
 
