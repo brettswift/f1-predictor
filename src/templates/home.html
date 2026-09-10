@@ -122,6 +122,24 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
   .snap{grid-template-columns:1fr 1fr}
   .slots{gap:7px}.slot .code{font-size:22px}.slot .nm{display:none}
 }
+/* Race desk refinement: keep controls readable without page overflow. */
+.stripgrid>*{min-width:0}.striptop h1{overflow-wrap:anywhere}
+.slot{min-width:0}.slot .ghost,.cdu .u,.dchip .no{font-size:12px;letter-spacing:.04em}
+.scq p,.scnote,.note{font-size:14px;line-height:1.6}
+.wiregrid{grid-template-columns:minmax(0,1.35fr) minmax(0,1fr)}
+.wiregrid>div{min-width:0;padding:24px}
+.dv{grid-template-columns:44px minmax(0,1fr) 92px;min-height:44px}
+.dv .c{font-size:17px}.dv .v{font-size:12px;line-height:1.6}
+.dv .g{height:16px}.dv .g b.pod{background:#269B68}.dv .g b.win{height:6px;top:5px;background:var(--acc)}
+.wire-intro{padding:16px 24px;border-bottom:1px solid var(--line);font-size:14px;color:var(--dim)}
+.desk-jump{display:inline-block;padding:12px 0;font-size:14px}
+@media(max-width:860px){
+ .wiregrid{grid-template-columns:minmax(0,1fr)}.wiregrid>div{padding:16px}.wire-intro{padding:16px}
+ .stripgrid{gap:16px}.slots{grid-template-columns:repeat(3,minmax(0,1fr))}
+ .slot .in{padding:10px 8px}.slot .ghost{font-size:11px;letter-spacing:0}
+ .scblock{grid-template-columns:minmax(0,1fr)}.votefoot>*{min-width:0;max-width:100%}
+ .lsel{flex-wrap:wrap;max-width:100%;margin-left:0}.lsel select{max-width:100%}
+}
 </style>
 {% endblock %}
 
@@ -262,29 +280,32 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
   {% endif %}
 </section>
 
+<a class="desk-jump" href="#the-wire">Explore The Wire ↓</a>
 <!-- ══ 2. THE WIRE ══ -->
-<section class="panel">
+<section class="panel" id="the-wire" tabindex="-1" aria-labelledby="wire-title">
   <div class="phead">
-    <h2>The Wire</h2>
+    <h2 id="wire-title">The Wire</h2>
     <span class="tag acc">{{ crowd['total'] }} cards in</span>
     <div class="rule"></div>
     <span class="lbl">Where the field is leaning</span>
   </div>
+  <div class="wire-intro"><strong>Driver sentiment</strong> is not available yet. Below are real crowd predictions, not positive or negative sentiment from social posts.</div>
   <div class="wiregrid">
     <div>
-      <div class="lbl" style="margin-bottom:10px">Crowd mood &mdash; podium picks</div>
+      <div class="lbl" style="margin-bottom:10px">Crowd picks &mdash; this race</div>
       {% if crowd['rows'] %}
       <div class="legend">
         <span><i style="background:rgba(38,224,138,.5)"></i><span class="lbl">On the podium</span></span>
         <span><i style="background:var(--acc)"></i><span class="lbl">To win</span></span>
       </div>
       {% for d in crowd['rows'] %}
-      <div class="dv">
-        <span class="c">{{ d['code'] }}</span>
+      <div class="dv" role="img" aria-label="{{ d['name'] }}: podium on {{ d['podium_pct'] }} percent of cards; winner on {{ d['win_pct'] }} percent of cards">
+        <span class="c" aria-hidden="true">{{ d['code'] }}</span>
         <span class="g" title="{{ d['name'] }}"><b class="pod" style="width:{{ d['podium_pct'] }}%"></b><b class="win" style="width:{{ d['win_pct'] }}%"></b></span>
-        <span class="v">{{ d['podium_pct'] }}%</span>
+        <span class="v" aria-hidden="true">Pod {{ d['podium_pct'] }}%<br>Win {{ d['win_pct'] }}%</span>
       </div>
       {% endfor %}
+      <p style="font-size:14px;margin-top:12px">Share of {{ crowd['total'] }} submitted cards. Winner picks are included in podium picks; driver percentages do not sum to 100%.</p>
       {% if crowd['rows']|length > 1 %}
       <div class="note">
         <b>{{ crowd['rows'][0]['code'] }}</b> is the consensus call at <b>{{ crowd['rows'][0]['podium_pct'] }}%</b> of cards.
