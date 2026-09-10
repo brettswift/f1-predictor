@@ -138,7 +138,7 @@ class TestScCrowd:
         db = get_db()
         race_id = _insert_race(db, 201)
         crowd = get_sc_crowd(db, race_id)
-        assert crowd == {'votes': 0, 'yes_pct': 50, 'consensus': 0}
+        assert crowd == {'votes': 0, 'yes_pct': 50, 'consensus': 0, 'status': 'empty'}
 
     def test_all_yes_votes(self, app):
         from app import get_db, get_sc_crowd
@@ -147,7 +147,7 @@ class TestScCrowd:
         _insert_sc_vote(db, 'u1', race_id, 80, 1.5)
         _insert_sc_vote(db, 'u2', race_id, 40, 1.2)
         crowd = get_sc_crowd(db, race_id)
-        assert crowd == {'votes': 2, 'yes_pct': 100, 'consensus': 100}
+        assert crowd == {'votes': 2, 'yes_pct': 100, 'consensus': 100, 'status': 'ok'}
 
     def test_all_no_votes(self, app):
         from app import get_db, get_sc_crowd
@@ -155,7 +155,7 @@ class TestScCrowd:
         race_id = _insert_race(db, 203)
         _insert_sc_vote(db, 'u1', race_id, -80, 1.5)
         crowd = get_sc_crowd(db, race_id)
-        assert crowd == {'votes': 1, 'yes_pct': 0, 'consensus': -100}
+        assert crowd == {'votes': 1, 'yes_pct': 0, 'consensus': -100, 'status': 'ok'}
 
     def test_mixed_votes_consensus_formula(self, app):
         """3 yes, 1 no -> yes_pct=75, consensus = 75*2-100 = 50."""
@@ -165,7 +165,7 @@ class TestScCrowd:
         for i, conv in enumerate([80, 60, 30, -50]):
             _insert_sc_vote(db, f'u{i}', race_id, conv, 1.3)
         crowd = get_sc_crowd(db, race_id)
-        assert crowd == {'votes': 4, 'yes_pct': 75, 'consensus': 50}
+        assert crowd == {'votes': 4, 'yes_pct': 75, 'consensus': 50, 'status': 'ok'}
 
     def test_votes_scoped_to_race(self, app):
         """A vote on a different race must not leak into this race's crowd."""
@@ -175,7 +175,19 @@ class TestScCrowd:
         race_b = _insert_race(db, 206)
         _insert_sc_vote(db, 'u1', race_a, 90, 1.5)
         crowd_b = get_sc_crowd(db, race_b)
-        assert crowd_b == {'votes': 0, 'yes_pct': 50, 'consensus': 0}
+        assert crowd_b == {'votes': 0, 'yes_pct': 50, 'consensus': 0, 'status': 'empty'}
+
+    def test_db_failure_reports_unavailable(self, app):
+        """A failed read must not be reported as an empty crowd."""
+        from app import get_sc_crowd
+
+        class _BoomDB:
+            def execute(self, *args, **kwargs):
+                raise RuntimeError('database is unavailable')
+
+        result = get_sc_crowd(_BoomDB(), race_id=1)
+        assert result['status'] == 'unavailable'
+        assert result['votes'] == 0
 
 
 class TestScPool:

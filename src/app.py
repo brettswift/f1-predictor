@@ -1626,18 +1626,44 @@ SC_MIN_STAKE = 6
 
 
 def get_sc_crowd(db, race_id):
-    """Where the field sits on this race, on the same -100..100 scale."""
+    """Where the field sits on this race, on the same -100..100 scale.
+
+    Returns three distinct states that used to collapse into one:
+
+      ok            real votes to show
+      empty          no votes placed yet (succeeds but no rows)
+      unavailable    the query failed; the crowd is unknown, not empty
+
+    The ``status`` field distinguishes them; consumers that only need the
+    numeric payload get the same shape as before (votes/yes_pct/consensus).
+    """
     try:
         rows = db.execute(
             'SELECT conviction FROM sc_votes WHERE race_id = ?', (race_id,)
         ).fetchall()
     except Exception:
-        return {'votes': 0, 'yes_pct': 50, 'consensus': 0}
+        app.logger.exception('get_sc_crowd: DB query failed for race_id=%s', race_id)
+        return {
+            'votes': 0,
+            'yes_pct': 50,
+            'consensus': 0,
+            'status': 'unavailable',
+        }
     if not rows:
-        return {'votes': 0, 'yes_pct': 50, 'consensus': 0}
+        return {
+            'votes': 0,
+            'yes_pct': 50,
+            'consensus': 0,
+            'status': 'empty',
+        }
     yes = sum(1 for r in rows if r['conviction'] > 0)
     yes_pct = round(yes * 100.0 / len(rows))
-    return {'votes': len(rows), 'yes_pct': yes_pct, 'consensus': yes_pct * 2 - 100}
+    return {
+        'votes': len(rows),
+        'yes_pct': yes_pct,
+        'consensus': yes_pct * 2 - 100,
+        'status': 'ok',
+    }
 
 
 def _sc_settled(conviction, had_sc):
@@ -1866,7 +1892,9 @@ def build_desk(db, user, league_id=None):
 
     sid = user['session_id'] if user else None
     prediction = None
+    prediction_error = False
     sc_vote = None
+    sc_error = False
     if next_race and sid:
         try:
             prediction = db.execute('''
@@ -1878,11 +1906,24 @@ def build_desk(db, user, league_id=None):
                 JOIN drivers d3 ON p.p3_driver_id = d3.id
                 WHERE p.user_id = ? AND p.race_id = ?
             ''', (sid, next_race['id'])).fetchone()
+        except Exception:
+            app.logger.exception(
+                'build_desk: prediction read failed for user=%s race=%s',
+                sid, next_race['id'],
+            )
+            prediction = None
+            prediction_error = True
+        try:
             sc_vote = db.execute(
                 'SELECT * FROM sc_votes WHERE user_id = ? AND race_id = ?',
                 (sid, next_race['id'])).fetchone()
         except Exception:
-            prediction = None
+            app.logger.exception(
+                'build_desk: sc_vote read failed for user=%s race=%s',
+                sid, next_race['id'],
+            )
+            sc_vote = None
+            sc_error = True
 
     leagues = get_user_leagues(db, sid) if sid else []
     league = None
@@ -1901,10 +1942,12 @@ def build_desk(db, user, league_id=None):
         'user': user,
         'next_race': next_race,
         'user_prediction': prediction,
+        'prediction_error': prediction_error,
         'sc_vote': sc_vote,
+        'sc_error': sc_error,
         'drivers': db.execute('SELECT * FROM drivers ORDER BY number').fetchall(),
-        'crowd': get_pick_distribution(db, next_race['id']) if next_race else {'total': 0, 'rows': []},
-        'sc_crowd': get_sc_crowd(db, next_race['id']) if next_race else {'votes': 0, 'yes_pct': 50, 'consensus': 0},
+        'crowd': get_pick_distribution(db, next_race['id']) if next_race else {'total': 0, 'rows': [], 'status': 'empty'},
+        'sc_crowd': get_sc_crowd(db, next_race['id']) if next_race else {'votes': 0, 'yes_pct': 50, 'consensus': 0, 'status': 'empty'},
         'sc_stats': get_safety_car_stats(db),
         'sc_pool': get_sc_pool(db, sid),
         'sc_pool_start': SC_POOL_START,
@@ -1992,24 +2035,30 @@ def predict(race_id):
             except (TypeError, ValueError):
                 conviction = 0
             conviction = max(-100, min(100, conviction))
-            if abs(conviction) >= SC_MIN_STAKE:
-                consensus = get_sc_crowd(db, race_id)['consensus']
-                db.execute('''
-                    INSERT INTO sc_votes (user_id, race_id, conviction, multiplier)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(user_id, race_id) DO UPDATE SET
-                        conviction = excluded.conviction,
-                        multiplier = excluded.multiplier
-                ''', (user['session_id'], race_id, conviction,
-                      sc_multiplier(conviction, consensus)))
+            consensus = get_sc_crowd(db, race_id)['consensus']
+            multiplier = (
+                sc_multiplier(conviction, consensus)
+                if abs(conviction) >= SC_MIN_STAKE
+                else 1.0
+            )
+            db.execute('''
+                INSERT INTO sc_votes (user_id, race_id, conviction, multiplier)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, race_id) DO UPDATE SET
+                    conviction = excluded.conviction,
+                    multiplier = excluded.multiplier
+            ''', (user['session_id'], race_id, conviction, multiplier))
             db.commit()
             flash('Card locked in.', 'success')
             return redirect(url_for('home'))
-        except Exception as e:
+        except Exception as exc:
             db.rollback()
-            # ADM-006/ADM-007: Graceful fallback for any remaining constraint violations
-            flash('You already submitted predictions for this race. Visit the race page to update.', 'error')
-            return redirect(url_for('races'))
+            app.logger.warning(
+                'predict: DB error for user=%s race=%s: %s',
+                user['session_id'], race_id, exc,
+            )
+            flash('Could not save your card. If you already submitted, your picks are safe.', 'error')
+            return redirect(url_for('home'))
 
     existing = db.execute('''
         SELECT p1_driver_id, p2_driver_id, p3_driver_id
