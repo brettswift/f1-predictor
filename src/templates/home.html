@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
-{% block title %}Race Desk - F1 Predictor{% endblock %}
-{% block meta_description %}Where the field is leaning for the next Formula 1 race — crowd mood, safety-car odds, live standings, and your podium call.{% endblock %}
+{% block title %}The Undercut — F1 sentiment{% endblock %}
+{% block meta_description %}The F1 conversation, driver sentiment and your optional race predictions. Explore The Wire and keep your own race card separate.{% endblock %}
 
 {% block extra_css %}
 <style>
@@ -153,9 +153,13 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
   .lsel select{max-width:100%}
 }
 </style>
+<link rel="stylesheet" href="{{ url_for('static', filename='sentiment-desk.css') }}">
 {% endblock %}
 
 {% block content %}
+<header class="desk-header"><a class="desk-brand" href="{{ url_for('index') }}">THE UNDER<span>·</span>CUT</a><nav aria-label="Main navigation"><a href="#the-wire">The Wire</a><a href="#talking-points">Stories</a><a href="#your-race-card">Your card</a><a href="{{ url_for('races') }}">Calendar</a>{% if anonymous %}<a href="{{ url_for('login') }}">Log in</a>{% else %}<a href="{{ url_for('profile') }}">Profile</a><a href="{{ url_for('leagues') }}">Leagues</a>{% endif %}</nav></header>
+<div class="desk-intro"><span class="eyebrow">The conversation beyond the chequered flag</span><p>Explore the hype, the doubt and the stories moving Formula 1 fans.</p></div>
+
 
 {% if next_race %}
 {% set votable = next_race['status'] == 'open' and not user_prediction %}
@@ -187,12 +191,14 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
 </section>
 {% endif %}
 
+<section class="panel sentiment-stage" aria-labelledby="sentiment-heading"><div class="phead"><div><span class="eyebrow">Community conversation · Not your votes</span><h2 id="sentiment-heading">The sentiment podium</h2></div><span class="tag acc">Awaiting data</span></div><div class="sentiment-podium" aria-label="Sentiment rankings not yet available">{% for place in [2,1,3] %}<div class="sentiment-place rank-{{ place }}"><span>Sentiment #{{ place }}</span><strong>—</strong><p>Awaiting sentiment</p></div>{% endfor %}</div><p class="section-note">Rankings will reflect positive conversation, not race predictions. No drivers are ranked until verified sentiment data is available.</p></section>
+<div class="sentiment-layout"><section class="panel" id="the-wire" aria-labelledby="wire-heading"><div class="phead"><div><span class="eyebrow">The Wire</span><h2 id="wire-heading">Where fans stand</h2></div></div><div class="pbody wire-empty"><span class="empty-signal" aria-hidden="true">〰</span><h3>The conversation is coming.</h3><p>Driver sentiment isn’t available yet. When it is, you’ll see positive, neutral and negative shares, source coverage and when they were last updated.</p><p class="section-note">Your race-card votes never contribute to this chart.</p></div></section><aside class="panel" id="talking-points"><div class="phead"><h2>What’s driving the mood</h2></div><div class="pbody"><span class="eyebrow">Talking points</span><h3>Stories need sources.</h3><p>Verified conversation summaries will appear here once source coverage is available.</p><div class="perspective"><h3>Noise isn’t a forecast.</h3><p>Sentiment tells you how fans feel, not who will win. Your predictions are your own.</p></div></div></aside></div>
 <!-- ══ 1. VOTING ══ -->
-<section class="panel">
+<section class="panel personal-card" id="your-race-card">
   <div class="phead">
-    <h2>Your Race Card</h2>
+    <div><span class="eyebrow">Your predictions · Not sentiment</span><h2>Your Race Card</h2></div>
     {% if anonymous %}<span class="tag">Visitor</span>
-    {% elif user_prediction %}<span class="tag pos">Locked in</span>
+    {% elif user_prediction %}<span class="tag pos">Your saved vote</span>
     {% elif next_race and next_race['status'] == 'open' %}<span class="tag warn">Not voted</span>{% endif %}
     <div class="rule"></div>
     <span class="lbl">Podium 20 pts &middot; safety car pays from its own pool</span>
@@ -201,6 +207,10 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
   {% if not next_race %}
   <div class="pbody"><p style="margin:0">No race on the board. The season either hasn't opened or every round is done.</p></div>
   {% else %}
+  {% if not user_prediction %}
+  <details class="vote-disclosure" id="vote-disclosure">
+    <summary class="vote-invite"><span><strong>Got a different read?</strong><span class="invite-copy">Voting is optional. Choose your podium and make a safety-car call.</span></span><span class="btn btn-warn">Make your race card ↗</span></summary>
+  {% endif %}
   <form method="POST" action="{{ url_for('predict', race_id=next_race['id']) }}" id="cardform">
     <input type="hidden" name="p1" id="f_p1" value="{{ user_prediction['p1_driver_id'] if user_prediction else '' }}">
     <input type="hidden" name="p2" id="f_p2" value="{{ user_prediction['p2_driver_id'] if user_prediction else '' }}">
@@ -213,10 +223,10 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
            data-anon="{{ 1 if anonymous else 0 }}"
            data-login="{{ url_for('login') }}">
         {% for pos in [2, 1, 3] %}
-        <button type="button" class="slot {% if user_prediction %}filled locked{% else %}empty{% endif %}" data-pos="{{ pos }}">
+        <button type="button" class="slot {% if user_prediction %}filled locked{% else %}empty{% endif %}" data-pos="{{ pos }}" {% if user_prediction or not votable %}disabled{% endif %}>
           {% if user_prediction %}<span class="team"></span>{% endif %}
           <div class="in">
-            <span class="ghost">P{{ pos }}{% if not user_prediction %} &middot; Empty{% endif %}</span>
+            <span class="ghost">Your P{{ pos }}{% if not user_prediction %} &middot; Empty{% endif %}</span>
             {% if user_prediction %}
             <span><span class="code">{{ (user_prediction['p' ~ pos ~ '_code'] or user_prediction['p' ~ pos ~ '_name'].split()[-1][:3])|upper }}</span><span class="nm">{{ user_prediction['p' ~ pos ~ '_name'] }}</span></span>
             {% else %}
@@ -231,7 +241,7 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
       <!-- safety car, directly below the podium -->
       <div class="scblock">
         <div class="scq">
-          <span class="lbl" style="color:var(--warn)">Second pool</span>
+          <span class="lbl" style="color:var(--warn)">{% if user_prediction %}Your saved safety-car call · Read-only{% else %}Your safety-car call{% endif %}</span>
           <h3>Will a Safety Car or VSC be deployed?</h3>
           <p>Staked from your <b>safety-car pool only</b>. Sit further from the crowd for a bigger multiplier &mdash; win or lose, your podium points never move and the pool floors at zero.</p>
         </div>
@@ -242,11 +252,12 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
                data-votes="{{ sc_crowd['votes'] }}"
                data-pool="{{ sc_pool['pool'] }}"
                data-min="{{ sc_min_stake }}"
+               data-saved-multiplier="{{ sc_vote['multiplier'] if sc_vote else 1 }}"
                data-locked="{{ 0 if votable else 1 }}">
             <div class="rail2"></div>
             <div class="fill" id="fill"></div>
             <div class="mid"></div>
-            {% if sc_crowd['votes'] %}
+            {% if sc_crowd['votes'] and not user_prediction %}
             <div class="crowd" style="left:{{ sc_crowd['yes_pct'] }}%">
               <div class="pin"></div><div class="t">CROWD {{ sc_crowd['yes_pct'] }}% YES</div>
             </div>
@@ -254,7 +265,7 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
             <div class="knob" id="knob" style="left:50%"></div>
             <input class="sr" id="sr" type="range" min="-100" max="100" step="1"
                    value="{{ sc_vote['conviction'] if sc_vote else 0 }}"
-                   {% if not votable %}disabled{% endif %} aria-label="Safety car conviction">
+                   {% if not votable %}disabled{% endif %} aria-label="{% if user_prediction %}Your saved safety car conviction (read-only){% else %}Safety car conviction{% endif %}">
           </div>
           <div class="scends">
             <span class="lbl" style="color:var(--neg)">&#9664; Clean race</span>
@@ -289,17 +300,18 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
       </div>
     </div>
   </form>
+  {% if not user_prediction %}</details>{% endif %}
   {% endif %}
 </section>
 
 <a class="wire-jump" href="#the-wire">Explore The Wire &darr;</a>
 <!-- ══ 2. THE WIRE ══ -->
-<section class="panel" id="the-wire" tabindex="-1" aria-labelledby="wire-title">
+<details class="crowd-disclosure"><summary>Crowd picks &amp; safety-car calls <span>Player votes, not sentiment</span></summary><section class="panel" id="crowd-picks" tabindex="-1" aria-labelledby="wire-title">
   <div class="phead">
-    <h2 id="wire-title">The Wire</h2>
+    <h2 id="wire-title">Crowd picks</h2>
     <span class="tag acc">{{ crowd['total'] }} cards in</span>
     <div class="rule"></div>
-    <span class="lbl">Where the field is leaning</span>
+    <span class="lbl">Player predictions · Not sentiment</span>
   </div>
   <div class="wiregrid">
     <div>
@@ -349,7 +361,7 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
         This is not an empty grid; check back shortly.
       </p>
       {% else %}
-      <p class="wire-state">No cards in for this race yet. Vote first and you set the mood.</p>
+      <p class="wire-state">No cards in for this race yet. Be the first to make a prediction.</p>
       {% endif %}
     </div>
     <div>
@@ -378,9 +390,9 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
     </div>
   </div>
 </section>
-
-<!-- ══ 3. STANDINGS ══ -->
-<section class="panel">
+</details>
+<!-- Standings remain a secondary destination. -->
+<details class="standings-disclosure"><summary>Player standings</summary><section class="panel">
   <div class="phead">
     <h2>Standings</h2>
     {% if selected_league %}<span class="tag acc">{{ selected_league['emoji_or_color'] }} {{ selected_league['name'] }}</span>
@@ -435,6 +447,7 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
   {% endif %}
 </section>
 
+</details>
 {% if anonymous %}
 <section class="panel">
   <div class="phead"><h2>Get on the Board</h2><div class="rule"></div><span class="lbl">Takes one field</span></div>
@@ -449,6 +462,7 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
 </section>
 {% endif %}
 
+<nav class="desk-mobile" aria-label="Page sections"><a href="#the-wire">The Wire</a><a href="#talking-points">Stories</a><a href="#your-race-card">Your card</a></nav>
 <!-- driver picker -->
 <div class="scrim" id="scrim" role="dialog" aria-modal="true" aria-labelledby="pickhead">
   <div class="picker">
@@ -507,7 +521,7 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
   var loginUrl = slots.dataset.login;
 
   /* colour the team bars on an already-locked card */
-  [].forEach.call(document.querySelectorAll('.slot.filled .team'), function(el){ el.style.background = 'var(--acc)'; });
+  [].forEach.call(document.querySelectorAll('.slot.filled .team'), function(el){ el.style.background = 'var(--warn)'; });
 
   /* ── driver picker ── */
   var scrim = document.getElementById('scrim');
@@ -526,11 +540,16 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
       c.disabled = takenElsewhere;
     });
     scrim.classList.add('on');
+    var first = scrim.querySelector('button:not(:disabled)'); if(first) first.focus();
   }
-  function closePicker(){ scrim.classList.remove('on'); activePos = null; }
+  function closePicker(){ scrim.classList.remove('on'); var previous=activePos; activePos = null; if(previous) slots.querySelector('[data-pos="'+previous+'"]').focus(); }
   document.getElementById('pickclose').addEventListener('click', closePicker);
   scrim.addEventListener('click', function(e){ if(e.target === scrim) closePicker(); });
-  document.addEventListener('keydown', function(e){ if(e.key === 'Escape') closePicker(); });
+  document.addEventListener('keydown', function(e){
+    if(!scrim.classList.contains('on')) return;
+    if(e.key === 'Escape') closePicker();
+    if(e.key === 'Tab') {var controls=[].slice.call(scrim.querySelectorAll('button:not(:disabled)'));var first=controls[0],last=controls[controls.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus()}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus()}}
+  });
   chips.forEach(function(c){
     c.addEventListener('click', function(){
       if(activePos == null) return;
@@ -589,7 +608,7 @@ input[type=range].sr{position:absolute;left:0;right:0;top:14px;width:100%;height
       if(v >= 0){ f.className='fill'; f.style.left='50%'; f.style.width=(a/2)+'%'; }
       else { f.className='fill no'; f.style.left=(50-a/2)+'%'; f.style.width=(a/2)+'%'; }
       var staked = a >= MIN;
-      var mult = staked ? (1 + Math.abs(v-CROWD)/200*3.4 + a/260) : 1;
+      var mult = locked ? (parseFloat(track.dataset.savedMultiplier) || 1) : (staked ? (1 + Math.abs(v-CROWD)/200*3.4 + a/260) : 1);
       var swing = staked ? Math.round(a * mult) : 0;
       var call = document.getElementById('scCall');
       call.textContent = staked ? (v > 0 ? 'SAFETY CAR' : 'CLEAN RACE') : '—';
