@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-09-11T11:39:00Z",
+  "source": "motorsport_f1_rss",
+  "source_kind": "editorial_coverage",
+  "request": {
+    "url": "https://www.motorsport.com/rss/f1/news/",
+    "status": 200,
+    "content_type": "application/xml"
+  },
+  "sample_metadata": {
+    "stable_id": "10854486",
+    "source_url": "https://www.motorsport.com/f1/news/i-fucked-up-quite-a-lot-how-yuki-tsunoda-discovered-the-complexity-of-f1-2026-at-monza/10854486/?utm_source=RSS&utm_medium=referral&utm_campaign=RSS-F1&utm_term=News&utm_content=www",
+    "source_created_at": "2026-09-11T11:38:58Z"
+  },
+  "limitations": [
+    "This verifies an accessible editorial RSS source, not Reddit or fan sentiment.",
+    "No article body, author profile, credential, request header, or token is retained."
+  ]
+}
