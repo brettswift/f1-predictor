@@ -26,9 +26,14 @@ Rules applied throughout:
 
 Sizing: each should be a day or less. If one grows past that, split it.
 
-**Model: Sonnet 5 (Dev) → Sonnet 5 (QA)** for all 15 stories. Recorded on each
-Linear ticket. QA must empirically verify the database outcome, not just review
-the code — every story here is written so that is possible.
+**Model: Sonnet 5 (Dev) → Sonnet 4.6 (QA)** for all 15 stories. QA must
+empirically verify the database outcome, not just review the code — every story
+here is written so that is possible.
+
+The dispatcher reads this from Linear **labels**, not from story text:
+`model-dev:sonnet-5` and `model-qa:sonnet-4-6`. The alias is `sonnet-4-6` with
+hyphens — `sonnet-4.6` does not resolve. Labels are authoritative; anything
+written in a description is documentation only.
 
 **Deployment target:** merging to `f1-predictor@main` is the only deploy path.
 There is no dev environment; `f1-dev` does not exist on the remote. See
