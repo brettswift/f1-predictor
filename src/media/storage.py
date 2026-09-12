@@ -37,22 +37,50 @@ def _normalise_article(article: Mapping[str, object]) -> dict[str, object]:
 
 
 def store_article(article: Mapping[str, object], *, db: sqlite3.Connection | None = None) -> bool:
-    """Insert an article once, returning whether this call created the row.
+    """Upsert an article on its GUID.
 
-    The feed GUID is the physical dedup boundary. ``INSERT OR IGNORE`` makes
-    re-polling safe even when multiple workers receive the same feed item.
+    Inserts a new row on first sight; on conflict updates the mutable fields
+    (fetch_url, title, source, published_at, content_raw, content_hash) but
+    preserves the original ``fetched_at`` timestamp.
+
+    Returns True when this call created the row, False when it updated an
+    existing row.
     """
     values = _normalise_article(article)
-    cursor = _connection(db).execute(
+    values.setdefault("fetched_at", None)
+    conn = _connection(db)
+
+    existing = conn.execute(
+        "SELECT 1 FROM media_articles WHERE guid = ?", (values["guid"],)
+    ).fetchone()
+
+    if existing:
+        conn.execute(
+            """
+            UPDATE media_articles
+            SET fetch_url = :fetch_url,
+                title = :title,
+                source = :source,
+                published_at = :published_at,
+                content_raw = :content_raw,
+                content_hash = :content_hash
+            WHERE guid = :guid
+            """,
+            values,
+        )
+        return False
+
+    conn.execute(
         """
-        INSERT OR IGNORE INTO media_articles
-            (guid, fetch_url, title, source, published_at, content_raw, content_hash)
+        INSERT INTO media_articles
+            (guid, fetch_url, title, source, published_at, content_raw, content_hash, fetched_at)
         VALUES
-            (:guid, :fetch_url, :title, :source, :published_at, :content_raw, :content_hash)
+            (:guid, :fetch_url, :title, :source, :published_at, :content_raw, :content_hash,
+             COALESCE(:fetched_at, CURRENT_TIMESTAMP))
         """,
         values,
     )
-    return cursor.rowcount == 1
+    return True
 
 
 def find_duplicate_by_hash(

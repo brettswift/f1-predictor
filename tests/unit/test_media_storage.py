@@ -29,21 +29,32 @@ def test_media_schema_is_idempotent(app):
     columns = {row[1] for row in db.execute("PRAGMA table_info(media_articles)").fetchall()}
     assert columns == {
         "guid", "fetch_url", "title", "source", "published_at", "content_raw",
-        "content_hash", "created_at",
+        "content_hash", "fetched_at",
     }
 
 
-def test_store_article_is_idempotent_and_preserves_first_row(app):
+def test_store_article_upserts_and_preserves_fetched_at(app):
     import app as app_module
+    import time
 
     db = app_module.get_db()
     assert store_article(_article(), db=db) is True
+
+    first = db.execute("SELECT guid, title, fetched_at FROM media_articles").fetchone()
+    assert db.execute("SELECT COUNT(*) FROM media_articles").fetchone()[0] == 1
+    assert first["guid"] == "feed-guid-1"
+    assert first["title"] == "Original title"
+
+    # Pause briefly so we can prove fetched_at does not advance.
+    time.sleep(0.01)
+
     assert store_article(_article(title="Corrected title"), db=db) is False
 
-    row = db.execute("SELECT guid, title FROM media_articles").fetchone()
+    row = db.execute("SELECT guid, title, fetched_at FROM media_articles").fetchone()
     assert db.execute("SELECT COUNT(*) FROM media_articles").fetchone()[0] == 1
     assert row["guid"] == "feed-guid-1"
-    assert row["title"] == "Original title"
+    assert row["title"] == "Corrected title"
+    assert row["fetched_at"] == first["fetched_at"]
 
 
 def test_store_article_computes_full_content_sha256_and_finds_duplicate(app):

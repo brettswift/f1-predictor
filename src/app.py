@@ -379,7 +379,7 @@ def init_db():
             published_at TIMESTAMP,
             content_raw  TEXT NOT NULL,
             content_hash TEXT NOT NULL,
-            created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            fetched_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     db.execute('''
@@ -491,7 +491,7 @@ def _apply_migrations(db):
 
 def _migrate_media_articles(db):
     """Rebuild the superseded feed schema without losing fetched rows."""
-    required = {'guid', 'fetch_url', 'title', 'source', 'published_at', 'content_raw', 'content_hash', 'created_at'}
+    required = {'guid', 'fetch_url', 'title', 'source', 'published_at', 'content_raw', 'content_hash', 'fetched_at'}
     if required <= _column_names(db, 'media_articles'):
         return
 
@@ -501,14 +501,19 @@ def _migrate_media_articles(db):
         CREATE TABLE media_articles (
             guid TEXT PRIMARY KEY UNIQUE, fetch_url TEXT NOT NULL, title TEXT NOT NULL,
             source TEXT NOT NULL, published_at TIMESTAMP, content_raw TEXT NOT NULL,
-            content_hash TEXT NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            content_hash TEXT NOT NULL, fetched_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    for row in db.execute("SELECT guid, url, title, source, published_at, body, fetched_at FROM media_articles_legacy"):
+    legacy_cols = _column_names(db, 'media_articles_legacy')
+    fetched_at_col = 'fetched_at' if 'fetched_at' in legacy_cols else 'created_at' if 'created_at' in legacy_cols else None
+    for row in db.execute(f"""
+        SELECT guid, url, title, source, published_at, body, {fetched_at_col or 'CURRENT_TIMESTAMP'} AS fetched_at
+        FROM media_articles_legacy
+    """):
         content_raw = row['body'] or ''
         db.execute("""
             INSERT OR IGNORE INTO media_articles
-                (guid, fetch_url, title, source, published_at, content_raw, content_hash, created_at)
+                (guid, fetch_url, title, source, published_at, content_raw, content_hash, fetched_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
         """, (
             row['guid'], row['url'], row['title'], row['source'],
