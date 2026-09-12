@@ -143,14 +143,44 @@ These must be resolved before E6 work restarts:
 
 ---
 
+## How deployment actually works
+
+Verified 2026-09-12 against the remotes and workflow files. Two repos are
+involved and the branch names collide confusingly, so read this before assuming.
+
+| Repo | Branch | Role |
+|---|---|---|
+| `f1-predictor` | `main` | The only deploy trigger. Merging here builds and ships. |
+| `k8s_nas` | `live` | Default branch. ArgoCD watches it. CI writes the image digest here. |
+
+**There is one environment.** Pushing to `f1-predictor@main` builds the image,
+tags it `:live` plus a semver and a sha, then clones `k8s_nas`, pins the new
+**digest** into `apps/f1-predictor/overlays/prod/kustomization.yaml`, and pushes
+to `k8s_nas@live`. ArgoCD picks it up from there.
+
+Two traps:
+
+- **`live` is a branch of `k8s_nas`, not of `f1-predictor`.** "Deploy to live"
+  is accurate, but the branch is in the infra repo. There is no `live` branch in
+  this repo, and creating one would do nothing.
+- **`f1-dev` does not exist on the remote and we do not deploy to dev.**
+  `.github/workflows/build-f1-predictor-dev.yml` triggers on `push: [f1-dev]`,
+  so it has never run. The `overlays/dev` kustomization exists but nothing
+  deploys it. Treat dev as not a thing until someone deliberately revives it.
+
+The "prod" naming inside `k8s_nas` paths and tags is historical — the workflow's
+own header comment admits it deploys what is really a QA environment at
+`f1.brettswift.com`. Don't read `overlays/prod` as meaning a separate production
+tier exists.
+
+---
+
 ## Known doc drift (unrelated to sentiment)
 
 - **Deployment docs are stale.** `README.md`, `WORKFLOW.md`, and
   `DEPLOYMENT.md` describe an `f1-dev`/`live` two-branch GitOps flow with an
-  ArgoCD PostSync polling hook. Reality: CI triggers on `main`, computes a semver
-  tag, and writes the image **digest** directly into the `k8s_nas` repo. The
-  `f1-dev` and `live` branches do not exist. The polling hook is moot when CI
-  pins the digest.
+  ArgoCD PostSync polling hook. See the verified flow below; the polling hook is
+  moot when CI pins the digest.
 - **`DEPLOYMENT.md` still claims data comes from "Ergast/Jolpica."** It comes
   from OpenF1.
 - **`docs/BACKLOG.md` is stranded** on the unmerged `docs/2026-relaunch-brief`

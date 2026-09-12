@@ -26,6 +26,14 @@ Rules applied throughout:
 
 Sizing: each should be a day or less. If one grows past that, split it.
 
+**Model: Sonnet 5 (Dev) → Sonnet 5 (QA)** for all 15 stories. Recorded on each
+Linear ticket. QA must empirically verify the database outcome, not just review
+the code — every story here is written so that is possible.
+
+**Deployment target:** merging to `f1-predictor@main` is the only deploy path.
+There is no dev environment; `f1-dev` does not exist on the remote. See
+`../FEATURE_STATE.md` § How deployment actually works before writing M-14.
+
 ---
 
 ## Phase 1 — Fetch
