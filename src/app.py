@@ -366,6 +366,36 @@ def init_db():
         )
     ''')
 
+    # Media pipeline stage 1: raw feed items and fetch-run observability.
+    # guid is the feed's stable identifier and is the physical dedup boundary.
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS media_articles (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            guid         TEXT NOT NULL UNIQUE,
+            source       TEXT NOT NULL,
+            url          TEXT NOT NULL,
+            title        TEXT NOT NULL,
+            body         TEXT,
+            published_at TIMESTAMP,
+            fetched_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status       TEXT NOT NULL DEFAULT 'pending'
+                         CHECK (status IN ('pending', 'analysed', 'failed', 'skipped'))
+        )
+    ''')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS fetch_runs (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            source         TEXT NOT NULL,
+            started_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            finished_at    TIMESTAMP,
+            fetched_count  INTEGER NOT NULL DEFAULT 0,
+            stored_count   INTEGER NOT NULL DEFAULT 0,
+            outcome        TEXT NOT NULL DEFAULT 'running'
+                           CHECK (outcome IN ('running', 'success', 'failed')),
+            error_message  TEXT
+        )
+    ''')
+
     # Last-known-good cache for upstream reads (F1-02)
     openf1.ensure_cache_table(db)
 
