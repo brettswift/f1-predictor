@@ -6,40 +6,63 @@ fetch runner records its own lifecycle with the helpers below.
 """
 
 from collections.abc import Mapping
+import hashlib
 import sqlite3
+from typing import Optional
 
 
-_ARTICLE_FIELDS = ("guid", "source", "url", "title", "body", "published_at")
+_REQUIRED_FIELDS = ("guid", "fetch_url", "title", "source", "content_raw")
 
 
-def store_article(db: sqlite3.Connection, article: Mapping[str, object]) -> int:
-    """Insert or refresh one feed article and return its database id.
+def _connection(db: sqlite3.Connection | None) -> sqlite3.Connection:
+    if db is not None:
+        return db
+    # Import lazily so feed workers can also supply an explicit connection.
+    from app import get_db
+    return get_db()
 
-    A feed GUID is immutable identity. Re-fetching it updates mutable article
-    data (for example a corrected title) but intentionally never rewrites
-    ``fetched_at``: that timestamp records first discovery, not last polling.
-    ``published_at`` is passed through unchanged, including ``None``.
-    """
-    missing = [field for field in _ARTICLE_FIELDS[:4] if field not in article]
+
+def _normalise_article(article: Mapping[str, object]) -> dict[str, object]:
+    """Accept the storage contract, with legacy adapter aliases during rollout."""
+    values = dict(article)
+    values.setdefault("fetch_url", values.get("url"))
+    values.setdefault("content_raw", values.get("body"))
+    missing = [field for field in _REQUIRED_FIELDS if not values.get(field)]
     if missing:
         raise ValueError(f"article is missing required field(s): {', '.join(missing)}")
+    values["content_hash"] = hashlib.sha256(
+        str(values["content_raw"]).encode("utf-8")
+    ).hexdigest()
+    return values
 
-    values = {field: article.get(field) for field in _ARTICLE_FIELDS}
-    row = db.execute(
+
+def store_article(article: Mapping[str, object], *, db: sqlite3.Connection | None = None) -> bool:
+    """Insert an article once, returning whether this call created the row.
+
+    The feed GUID is the physical dedup boundary. ``INSERT OR IGNORE`` makes
+    re-polling safe even when multiple workers receive the same feed item.
+    """
+    values = _normalise_article(article)
+    cursor = _connection(db).execute(
         """
-        INSERT INTO media_articles (guid, source, url, title, body, published_at)
-        VALUES (:guid, :source, :url, :title, :body, :published_at)
-        ON CONFLICT(guid) DO UPDATE SET
-            source = excluded.source,
-            url = excluded.url,
-            title = excluded.title,
-            body = excluded.body,
-            published_at = excluded.published_at
-        RETURNING id
+        INSERT OR IGNORE INTO media_articles
+            (guid, fetch_url, title, source, published_at, content_raw, content_hash)
+        VALUES
+            (:guid, :fetch_url, :title, :source, :published_at, :content_raw, :content_hash)
         """,
         values,
+    )
+    return cursor.rowcount == 1
+
+
+def find_duplicate_by_hash(
+    content_hash: str, *, db: sqlite3.Connection | None = None
+) -> Optional[dict[str, object]]:
+    """Return the first stored article with this full-text SHA-256, if any."""
+    row = _connection(db).execute(
+        "SELECT * FROM media_articles WHERE content_hash = ? LIMIT 1", (content_hash,)
     ).fetchone()
-    return row[0]
+    return dict(row) if row is not None else None
 
 
 def start_fetch_run(db: sqlite3.Connection, source: str) -> int:

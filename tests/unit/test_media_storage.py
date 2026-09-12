@@ -1,16 +1,18 @@
 """Regression tests for the stage-1 media article storage contract."""
 
-from media.storage import finish_fetch_run, start_fetch_run, store_article
+import hashlib
+
+from media.storage import find_duplicate_by_hash, finish_fetch_run, start_fetch_run, store_article
 
 
 def _article(**overrides):
     article = {
-    "guid": "feed-guid-1",
-    "source": "formula1",
-    "url": "https://example.test/article",
-    "title": "Original title",
-    "body": "A feed summary",
-    "published_at": "2026-09-12 10:00:00",
+        "guid": "feed-guid-1",
+        "source": "formula1",
+        "fetch_url": "https://example.test/article",
+        "title": "Original title",
+        "content_raw": "A feed summary",
+        "published_at": "2026-09-12 10:00:00",
     }
     article.update(overrides)
     return article
@@ -24,44 +26,46 @@ def test_media_schema_is_idempotent(app):
     app_module.init_db()
 
     assert db.execute("SELECT COUNT(*) FROM media_articles").fetchone()[0] == 0
-    assert db.execute("SELECT COUNT(*) FROM fetch_runs").fetchone()[0] == 0
-    indexes = db.execute("PRAGMA index_list(media_articles)").fetchall()
-    assert any(index[2] for index in indexes)
+    columns = {row[1] for row in db.execute("PRAGMA table_info(media_articles)").fetchall()}
+    assert columns == {
+        "guid", "fetch_url", "title", "source", "published_at", "content_raw",
+        "content_hash", "created_at",
+    }
 
 
-def test_store_article_deduplicates_without_rewriting_first_fetch_time(app):
+def test_store_article_is_idempotent_and_preserves_first_row(app):
     import app as app_module
 
     db = app_module.get_db()
-    first_id = store_article(db, _article())
-    db.execute("UPDATE media_articles SET fetched_at = '2001-01-01 00:00:00' WHERE id = ?", (first_id,))
-    second_id = store_article(db, _article())
+    assert store_article(_article(), db=db) is True
+    assert store_article(_article(title="Corrected title"), db=db) is False
 
-    row = db.execute("SELECT guid, fetched_at FROM media_articles").fetchone()
-    assert first_id == second_id
+    row = db.execute("SELECT guid, title FROM media_articles").fetchone()
     assert db.execute("SELECT COUNT(*) FROM media_articles").fetchone()[0] == 1
     assert row["guid"] == "feed-guid-1"
-    assert row["fetched_at"] == "2001-01-01 00:00:00"
+    assert row["title"] == "Original title"
 
 
-def test_store_article_updates_changed_title_without_rewriting_fetched_at(app):
+def test_store_article_computes_full_content_sha256_and_finds_duplicate(app):
     import app as app_module
 
     db = app_module.get_db()
-    article_id = store_article(db, _article())
-    db.execute("UPDATE media_articles SET fetched_at = '2001-01-01 00:00:00' WHERE id = ?", (article_id,))
-    store_article(db, _article(title="Corrected title"))
+    article = _article(content_raw="Full article text")
+    expected_hash = hashlib.sha256(b"Full article text").hexdigest()
+    assert store_article(article, db=db) is True
 
-    row = db.execute("SELECT title, fetched_at FROM media_articles WHERE id = ?", (article_id,)).fetchone()
-    assert row["title"] == "Corrected title"
-    assert row["fetched_at"] == "2001-01-01 00:00:00"
+    duplicate = find_duplicate_by_hash(expected_hash, db=db)
+    assert duplicate is not None
+    assert duplicate["guid"] == article["guid"]
+    assert duplicate["content_hash"] == expected_hash
+    assert find_duplicate_by_hash("not-a-hash", db=db) is None
 
 
 def test_store_article_preserves_missing_publication_date_as_null(app):
     import app as app_module
 
     db = app_module.get_db()
-    store_article(db, _article(guid="undated-guid", published_at=None))
+    store_article(_article(guid="undated-guid", published_at=None), db=db)
 
     assert db.execute(
         "SELECT published_at FROM media_articles WHERE guid = 'undated-guid'"

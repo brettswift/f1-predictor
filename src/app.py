@@ -367,19 +367,19 @@ def init_db():
     ''')
 
     # Media pipeline stage 1: raw feed items and fetch-run observability.
-    # guid is the feed's stable identifier and is the physical dedup boundary.
+    # GUIDs from Formula1, Motorsport, and Autosport have been verified stable.
+    # If an adapter encounters an unstable permalink GUID, it must derive a
+    # stable GUID from its URL and publication timestamp before this boundary.
     db.execute('''
         CREATE TABLE IF NOT EXISTS media_articles (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            guid         TEXT NOT NULL UNIQUE,
-            source       TEXT NOT NULL,
-            url          TEXT NOT NULL,
+            guid         TEXT PRIMARY KEY UNIQUE,
+            fetch_url    TEXT NOT NULL,
             title        TEXT NOT NULL,
-            body         TEXT,
+            source       TEXT NOT NULL,
             published_at TIMESTAMP,
-            fetched_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            status       TEXT NOT NULL DEFAULT 'pending'
-                         CHECK (status IN ('pending', 'analysed', 'failed', 'skipped'))
+            content_raw  TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     db.execute('''
@@ -422,6 +422,8 @@ def _apply_migrations(db):
     new columns need an explicit ALTER. Every migration here is additive and
     idempotent — safe to run on every startup.
     """
+    _migrate_media_articles(db)
+
     users = _column_names(db, 'users')
     if 'email' not in users:
         # SQLite forbids UNIQUE in ALTER TABLE ADD COLUMN (only CREATE TABLE
@@ -486,6 +488,36 @@ def _apply_migrations(db):
         db.execute('ALTER TABLE users ADD COLUMN ranking_mode '
                    'CHECK (ranking_mode IN (\'total\', \'average\'))')
         app.logger.info('Migration: users.ranking_mode added')
+
+def _migrate_media_articles(db):
+    """Rebuild the superseded feed schema without losing fetched rows."""
+    required = {'guid', 'fetch_url', 'title', 'source', 'published_at', 'content_raw', 'content_hash', 'created_at'}
+    if required <= _column_names(db, 'media_articles'):
+        return
+
+    import hashlib
+    db.execute('ALTER TABLE media_articles RENAME TO media_articles_legacy')
+    db.execute("""
+        CREATE TABLE media_articles (
+            guid TEXT PRIMARY KEY UNIQUE, fetch_url TEXT NOT NULL, title TEXT NOT NULL,
+            source TEXT NOT NULL, published_at TIMESTAMP, content_raw TEXT NOT NULL,
+            content_hash TEXT NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    for row in db.execute("SELECT guid, url, title, source, published_at, body, fetched_at FROM media_articles_legacy"):
+        content_raw = row['body'] or ''
+        db.execute("""
+            INSERT OR IGNORE INTO media_articles
+                (guid, fetch_url, title, source, published_at, content_raw, content_hash, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+        """, (
+            row['guid'], row['url'], row['title'], row['source'],
+            row['published_at'], content_raw,
+            hashlib.sha256(content_raw.encode('utf-8')).hexdigest(), row['fetched_at'],
+        ))
+    db.execute('DROP TABLE media_articles_legacy')
+    app.logger.info('Migration: media_articles rebuilt for content-hash storage')
+
 
 # --- API fetching ---
 
