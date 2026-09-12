@@ -366,6 +366,36 @@ def init_db():
         )
     ''')
 
+    # Media pipeline stage 1: raw feed items and fetch-run observability.
+    # GUIDs from Formula1, Motorsport, and Autosport have been verified stable.
+    # If an adapter encounters an unstable permalink GUID, it must derive a
+    # stable GUID from its URL and publication timestamp before this boundary.
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS media_articles (
+            guid         TEXT PRIMARY KEY UNIQUE,
+            fetch_url    TEXT NOT NULL,
+            title        TEXT NOT NULL,
+            source       TEXT NOT NULL,
+            published_at TIMESTAMP,
+            content_raw  TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            fetched_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS fetch_runs (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            source         TEXT NOT NULL,
+            started_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            finished_at    TIMESTAMP,
+            fetched_count  INTEGER NOT NULL DEFAULT 0,
+            stored_count   INTEGER NOT NULL DEFAULT 0,
+            outcome        TEXT NOT NULL DEFAULT 'running'
+                           CHECK (outcome IN ('running', 'success', 'failed')),
+            error_message  TEXT
+        )
+    ''')
+
     # Last-known-good cache for upstream reads (F1-02)
     openf1.ensure_cache_table(db)
 
@@ -392,6 +422,8 @@ def _apply_migrations(db):
     new columns need an explicit ALTER. Every migration here is additive and
     idempotent — safe to run on every startup.
     """
+    _migrate_media_articles(db)
+
     users = _column_names(db, 'users')
     if 'email' not in users:
         # SQLite forbids UNIQUE in ALTER TABLE ADD COLUMN (only CREATE TABLE
@@ -456,6 +488,41 @@ def _apply_migrations(db):
         db.execute('ALTER TABLE users ADD COLUMN ranking_mode '
                    'CHECK (ranking_mode IN (\'total\', \'average\'))')
         app.logger.info('Migration: users.ranking_mode added')
+
+def _migrate_media_articles(db):
+    """Rebuild the superseded feed schema without losing fetched rows."""
+    required = {'guid', 'fetch_url', 'title', 'source', 'published_at', 'content_raw', 'content_hash', 'fetched_at'}
+    if required <= _column_names(db, 'media_articles'):
+        return
+
+    import hashlib
+    db.execute('ALTER TABLE media_articles RENAME TO media_articles_legacy')
+    db.execute("""
+        CREATE TABLE media_articles (
+            guid TEXT PRIMARY KEY UNIQUE, fetch_url TEXT NOT NULL, title TEXT NOT NULL,
+            source TEXT NOT NULL, published_at TIMESTAMP, content_raw TEXT NOT NULL,
+            content_hash TEXT NOT NULL, fetched_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    legacy_cols = _column_names(db, 'media_articles_legacy')
+    fetched_at_col = 'fetched_at' if 'fetched_at' in legacy_cols else 'created_at' if 'created_at' in legacy_cols else None
+    for row in db.execute(f"""
+        SELECT guid, url, title, source, published_at, body, {fetched_at_col or 'CURRENT_TIMESTAMP'} AS fetched_at
+        FROM media_articles_legacy
+    """):
+        content_raw = row['body'] or ''
+        db.execute("""
+            INSERT OR IGNORE INTO media_articles
+                (guid, fetch_url, title, source, published_at, content_raw, content_hash, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+        """, (
+            row['guid'], row['url'], row['title'], row['source'],
+            row['published_at'], content_raw,
+            hashlib.sha256(content_raw.encode('utf-8')).hexdigest(), row['fetched_at'],
+        ))
+    db.execute('DROP TABLE media_articles_legacy')
+    app.logger.info('Migration: media_articles rebuilt for content-hash storage')
+
 
 # --- API fetching ---
 
